@@ -273,7 +273,7 @@ module Mongo
         if (Time.now - start_time) > @timeout
           raise ConnectionTimeoutError, "could not obtain connection within " +
             "#{@timeout} seconds. The max pool size is currently #{@size}; " +
-            "consider increasing the pool size or timeout."
+            "consider increasing the pool size or timeout. Pool status: #{inspect}"
         end
 
         @connection_mutex.synchronize do
