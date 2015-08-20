@@ -320,7 +320,7 @@ module Mongo
       total_bytes_sent
       rescue => ex
         socket.close
-        raise ConnectionFailure, "Operation failed with the following exception: #{ex}:#{ex.message}"
+        raise ConnectionFailure, "Operation failed with the following exception: #{ex}:#{ex.inspect}"
       end
     end
 
