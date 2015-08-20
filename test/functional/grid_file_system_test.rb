@@ -1,4 +1,4 @@
-# Copyright (C) 2013 10gen Inc.
+# Copyright (C) 2009-2013 MongoDB, Inc.
 #
 # Licensed under the Apache License, Version 2.0 (the "License");
 # you may not use this file except in compliance with the License.
@@ -18,7 +18,7 @@ class GridFileSystemTest < Test::Unit::TestCase
   context "GridFileSystem:" do
     setup do
       @con = standard_connection
-      @db  = @con.db(MONGO_TEST_DB)
+      @db  = @con.db(TEST_DB)
     end
 
     teardown do
@@ -97,114 +97,114 @@ class GridFileSystemTest < Test::Unit::TestCase
     end
 
     context "When writing:" do
-     setup do
-       @data   = "BYTES" * 50
-       @grid = GridFileSystem.new(@db)
-       @grid.open('sample', 'w') do |f|
-         f.write @data
-       end
-     end
+      setup do
+        @data   = "BYTES" * 50
+        @grid = GridFileSystem.new(@db)
+        @grid.open('sample', 'w') do |f|
+          f.write @data
+        end
+      end
 
-     should "read sample data" do
-       data = @grid.open('sample', 'r') { |f| f.read }
-       assert_equal data.length, @data.length
-     end
+      should "read sample data" do
+        data = @grid.open('sample', 'r') { |f| f.read }
+        assert_equal data.length, @data.length
+      end
 
-     should "return the total number of bytes written" do
-       data = 'a' * 300000
-       assert_equal 300000, @grid.open('sample', 'w') {|f| f.write(data) }
-     end
+      should "return the total number of bytes written" do
+        data = 'a' * 300000
+        assert_equal 300000, @grid.open('sample', 'w') {|f| f.write(data) }
+      end
 
-     should "more read sample data" do
-       data = @grid.open('sample', 'r') { |f| f.read }
-       assert_equal data.length, @data.length
-     end
+      should "more read sample data" do
+        data = @grid.open('sample', 'r') { |f| f.read }
+        assert_equal data.length, @data.length
+      end
 
-     should "raise exception if file not found" do
-       assert_raise GridFileNotFound do
-         @grid.open('io', 'r') { |f| f.write('hello') }
-       end
-     end
+      should "raise exception if file not found" do
+        assert_raise GridFileNotFound do
+          @grid.open('io', 'r') { |f| f.write('hello') }
+        end
+      end
 
-     should "raise exception if not opened for write" do
-       assert_raise GridError do
-         @grid.open('sample', 'r') { |f| f.write('hello') }
-       end
-     end
+      should "raise exception if not opened for write" do
+        assert_raise GridError do
+          @grid.open('sample', 'r') { |f| f.write('hello') }
+        end
+      end
 
-     context "and when overwriting the file" do
-       setup do
-         @old = @grid.open('sample', 'r')
+      context "and when overwriting the file" do
+        setup do
+          @old = @grid.open('sample', 'r')
 
-         @new_data = "DATA" * 10
-         @grid.open('sample', 'w') do |f|
-           f.write @new_data
-         end
+          @new_data = "DATA" * 10
+          @grid.open('sample', 'w') do |f|
+            f.write @new_data
+          end
 
-         @new = @grid.open('sample', 'r')
-       end
+          @new = @grid.open('sample', 'r')
+        end
 
-       should "have a newer upload date" do
-         assert @new.upload_date > @old.upload_date, "New data is not greater than old date."
-       end
+        should "have a newer upload date" do
+          assert @new.upload_date > @old.upload_date, "New data is not greater than old date."
+        end
 
-       should "have a different files_id" do
-         assert_not_equal @new.files_id, @old.files_id
-       end
+        should "have a different files_id" do
+          assert_not_equal @new.files_id, @old.files_id
+        end
 
-       should "contain the new data" do
-         assert_equal @new_data, @new.read, "Expected DATA"
-       end
+        should "contain the new data" do
+          assert_equal @new_data, @new.read, "Expected DATA"
+        end
 
-       context "and on a second overwrite" do
-         setup do
-           @new_data = "NEW" * 1000
-           @grid.open('sample', 'w') do |f|
-             f.write @new_data
-           end
+        context "and on a second overwrite" do
+          setup do
+            @new_data = "NEW" * 1000
+            @grid.open('sample', 'w') do |f|
+              f.write @new_data
+            end
 
-           @ids = @db['fs.files'].find({'filename' => 'sample'}).map {|file| file['_id']}
-         end
+            @ids = @db['fs.files'].find({'filename' => 'sample'}).map {|file| file['_id']}
+          end
 
-         should "write a third version of the file" do
-           assert_equal 3, @db['fs.files'].find({'filename' => 'sample'}).count
-           assert_equal 3, @db['fs.chunks'].find({'files_id' => {'$in' => @ids}}).count
-         end
+          should "write a third version of the file" do
+            assert_equal 3, @db['fs.files'].find({'filename' => 'sample'}).count
+            assert_equal 3, @db['fs.chunks'].find({'files_id' => {'$in' => @ids}}).count
+          end
 
-         should "remove all versions and their data on delete" do
-           @grid.delete('sample')
-           assert_equal 0, @db['fs.files'].find({'filename' => 'sample'}).count
-           assert_equal 0, @db['fs.chunks'].find({'files_id' => {'$in' => @ids}}).count
-         end
+          should "remove all versions and their data on delete" do
+            @grid.delete('sample')
+            assert_equal 0, @db['fs.files'].find({'filename' => 'sample'}).count
+            assert_equal 0, @db['fs.chunks'].find({'files_id' => {'$in' => @ids}}).count
+          end
 
-         should "delete all versions which exceed the number of versions to keep specified by the option :versions" do
-           @versions = 1 + rand(4-1)
-           @grid.open('sample', 'w', :versions => @versions) do |f|
-             f.write @new_data
-           end
-           @new_ids = @db['fs.files'].find({'filename' => 'sample'}).map {|file| file['_id']}
-           assert_equal @versions, @new_ids.length
-           id = @new_ids.first
-           assert !@ids.include?(id)
-           assert_equal @versions, @db['fs.files'].find({'filename' => 'sample'}).count
-         end
+          should "delete all versions which exceed the number of versions to keep specified by the option :versions" do
+            @versions = 1 + rand(4-1)
+            @grid.open('sample', 'w', :versions => @versions) do |f|
+              f.write @new_data
+            end
+            @new_ids = @db['fs.files'].find({'filename' => 'sample'}).map {|file| file['_id']}
+            assert_equal @versions, @new_ids.length
+            id = @new_ids.first
+            assert !@ids.include?(id)
+            assert_equal @versions, @db['fs.files'].find({'filename' => 'sample'}).count
+          end
 
-         should "delete old versions on write with :delete_old is passed in" do
-           @grid.open('sample', 'w', :delete_old => true) do |f|
-             f.write @new_data
-           end
-           @new_ids = @db['fs.files'].find({'filename' => 'sample'}).map {|file| file['_id']}
-           assert_equal 1, @new_ids.length
-           id = @new_ids.first
-           assert !@ids.include?(id)
-           assert_equal 1, @db['fs.files'].find({'filename' => 'sample'}).count
-           assert_equal 1, @db['fs.chunks'].find({'files_id' => id}).count
-         end
-       end
-     end
-   end
+          should "delete old versions on write with :delete_old is passed in" do
+            @grid.open('sample', 'w', :delete_old => true) do |f|
+              f.write @new_data
+            end
+            @new_ids = @db['fs.files'].find({'filename' => 'sample'}).map {|file| file['_id']}
+            assert_equal 1, @new_ids.length
+            id = @new_ids.first
+            assert !@ids.include?(id)
+            assert_equal 1, @db['fs.files'].find({'filename' => 'sample'}).count
+            assert_equal 1, @db['fs.chunks'].find({'files_id' => id}).count
+          end
+        end
+      end
+    end
 
-   context "When writing chunks:" do
+    context "When writing chunks:" do
       setup do
         data   = "B" * 50000
         @grid = GridFileSystem.new(@db)

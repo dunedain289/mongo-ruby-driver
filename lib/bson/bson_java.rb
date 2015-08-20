@@ -1,4 +1,4 @@
-# Copyright (C) 2013 10gen Inc.
+# Copyright (C) 2009-2013 MongoDB, Inc.
 #
 # Licensed under the Apache License, Version 2.0 (the "License");
 # you may not use this file except in compliance with the License.
@@ -16,7 +16,7 @@ require 'jruby'
 
 include Java
 
-jar_dir = File.join(File.dirname(__FILE__), '../../ext/jbson')
+jar_dir = File.expand_path(File.join(File.dirname(__FILE__), '../../ext/jbson'))
 require File.join(jar_dir, 'lib/java-bson.jar')
 require File.join(jar_dir, 'target/jbson.jar')
 
@@ -28,9 +28,10 @@ module BSON
       ByteBuffer.new(enc.encode(obj))
     end
 
-    def self.deserialize(buf)
+    def self.deserialize(buf, opts={})
       dec = Java::OrgJbson::RubyBSONDecoder.new
       callback = Java::OrgJbson::RubyBSONCallback.new(JRuby.runtime)
+      callback.set_opts(opts);
       dec.decode(buf.to_s.to_java_bytes, callback)
       callback.get
     end

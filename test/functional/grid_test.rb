@@ -1,4 +1,4 @@
-# Copyright (C) 2013 10gen Inc.
+# Copyright (C) 2009-2013 MongoDB, Inc.
 #
 # Licensed under the Apache License, Version 2.0 (the "License");
 # you may not use this file except in compliance with the License.
@@ -35,7 +35,7 @@ end
 class GridTest < Test::Unit::TestCase
   context "Tests:" do
     setup do
-      @db = standard_connection.db(MONGO_TEST_DB)
+      @db = standard_connection.db(TEST_DB)
       @files  = @db.collection('test-fs.files')
       @chunks = @db.collection('test-fs.chunks')
     end
@@ -262,7 +262,7 @@ class GridTest < Test::Unit::TestCase
       end
 
       should "put and get a large io object if reading less than the chunk size" do
-        read_and_write_stream('sample_data', 256 * 1024)
+        read_and_write_stream('sample_data', 255 * 1024)
       end
 
       should "put and get a large io object if reading more than the chunk size" do

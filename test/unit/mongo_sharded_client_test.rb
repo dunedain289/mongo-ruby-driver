@@ -1,4 +1,4 @@
-# Copyright (C) 2013 10gen Inc.
+# Copyright (C) 2009-2013 MongoDB, Inc.
 #
 # Licensed under the Apache License, Version 2.0 (the "License");
 # you may not use this file except in compliance with the License.
@@ -14,23 +14,23 @@
 
 require "test_helper"
 
-class MongoShardedClientTest < Test::Unit::TestCase
+class MongoShardedClientUnitTest < Test::Unit::TestCase
   include Mongo
 
-  def setup
-    ENV["MONGODB_URI"] = nil
-  end
-
   def test_initialize_with_single_mongos_uri
-    ENV["MONGODB_URI"] = "mongodb://localhost:27017"
-    client = MongoShardedClient.new(:connect => false)
-    assert_equal [[ "localhost", 27017 ]], client.seeds
+    uri = "mongodb://localhost:27017"
+    with_preserved_env_uri(uri) do
+      client = MongoShardedClient.new(:connect => false)
+      assert_equal [[ "localhost", 27017 ]], client.seeds
+    end
   end
 
   def test_initialize_with_multiple_mongos_uris
-    ENV["MONGODB_URI"] = "mongodb://localhost:27017,localhost:27018"
-    client = MongoShardedClient.new(:connect => false)
-    assert_equal [[ "localhost", 27017 ], [ "localhost", 27018 ]], client.seeds
+    uri = "mongodb://localhost:27017,localhost:27018"
+    with_preserved_env_uri(uri) do
+      client = MongoShardedClient.new(:connect => false)
+      assert_equal [[ "localhost", 27017 ], [ "localhost", 27018 ]], client.seeds
+    end
   end
 
   def test_from_uri_with_string
@@ -39,8 +39,10 @@ class MongoShardedClientTest < Test::Unit::TestCase
   end
 
   def test_from_uri_with_env_variable
-    ENV["MONGODB_URI"] = "mongodb://localhost:27017,localhost:27018"
-    client = MongoShardedClient.from_uri(nil, :connect => false)
-    assert_equal [[ "localhost", 27017 ], [ "localhost", 27018 ]], client.seeds
+    uri = "mongodb://localhost:27017,localhost:27018"
+    with_preserved_env_uri(uri) do
+      client = MongoShardedClient.from_uri(nil, :connect => false)
+      assert_equal [[ "localhost", 27017 ], [ "localhost", 27018 ]], client.seeds
+    end
   end
 end

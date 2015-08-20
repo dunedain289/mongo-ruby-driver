@@ -1,4 +1,4 @@
-# Copyright (C) 2013 10gen Inc.
+# Copyright (C) 2009-2013 MongoDB, Inc.
 #
 # Licensed under the Apache License, Version 2.0 (the "License");
 # you may not use this file except in compliance with the License.
@@ -23,7 +23,7 @@ module BSON
     # Wrap code to be evaluated by MongoDB.
     #
     # @param [String] code the JavaScript code.
-    # @param [Hash] a document mapping identifiers to values, which
+    # @param [Hash] scope a document mapping identifiers to values, which
     #   represent the scope in which the code is to be executed.
     def initialize(code, scope={})
       @code  = code

@@ -1,4 +1,4 @@
-# Copyright (C) 2013 10gen Inc.
+# Copyright (C) 2009-2013 MongoDB, Inc.
 #
 # Licensed under the Apache License, Version 2.0 (the "License");
 # you may not use this file except in compliance with the License.
@@ -65,15 +65,17 @@ class ReplicaSetCursorTest < Test::Unit::TestCase
   def setup_client(read=:primary)
     route_read ||= read
     # Setup ReplicaSet Connection
-    @client = MongoReplicaSetClient.new(@rs.repl_set_seeds, :read => read)
+    @client = MongoReplicaSetClient.new(@rs.repl_set_seeds, :read => read, :op_timeout => TEST_OP_TIMEOUT)
+    authenticate_client(@client)
 
-    @db = @client.db(MONGO_TEST_DB)
+    @db = @client.db(TEST_DB)
     @db.drop_collection("cursor_tests")
     @coll = @db.collection("cursor_tests")
     insert_docs
 
     # Setup Direct Connections
     @primary = Mongo::MongoClient.new(*@client.manager.primary)
+    authenticate_client(@primary)
   end
 
   def insert_docs
@@ -93,6 +95,7 @@ class ReplicaSetCursorTest < Test::Unit::TestCase
         pool = cursor.instance_variable_get(:@pool)
         cursor.close
         @read = Mongo::MongoClient.new(pool.host, pool.port, :slave_ok => true)
+        authenticate_client(@read)
         tag
       rescue Mongo::ConnectionFailure
         false
@@ -107,24 +110,26 @@ class ReplicaSetCursorTest < Test::Unit::TestCase
     read_opts[:comment] = object_id
 
     # set profiling level to 2 on client and member to which the query will be routed
-    @client.db(MONGO_TEST_DB).profiling_level = :all
+    @client.db(TEST_DB).profiling_level = :all
     @client.secondaries.each do |node|
       node = Mongo::MongoClient.new(node[0], node[1], :slave_ok => true)
-      node.db(MONGO_TEST_DB).profiling_level = :all
+      authenticate_client(node)
+      node.db(TEST_DB).profiling_level = :all
     end
 
     @cursor = @coll.find({}, read_opts)
     @cursor.next
 
     # on client and other members set profiling level to 0
-    @client.db(MONGO_TEST_DB).profiling_level = :off
+    @client.db(TEST_DB).profiling_level = :off
     @client.secondaries.each do |node|
       node = Mongo::MongoClient.new(node[0], node[1], :slave_ok => true)
-      node.db(MONGO_TEST_DB).profiling_level = :off
+      authenticate_client(node)
+      node.db(TEST_DB).profiling_level = :off
     end
     # do a query on system.profile of the reader to see if it was used for the query
-    profiled_queries = @read.db(MONGO_TEST_DB).collection('system.profile').find({
-      'ns' => "#{MONGO_TEST_DB}.cursor_tests", "query.$comment" => object_id })
+    profiled_queries = @read.db(TEST_DB).collection('system.profile').find({
+      'ns' => "#{TEST_DB}.cursor_tests", "query.$comment" => object_id })
 
     assert_equal 1, profiled_queries.count
   end
@@ -132,6 +137,7 @@ class ReplicaSetCursorTest < Test::Unit::TestCase
   # batch from send_initial_query is 101 documents
   # check that you get n_docs back from the query, with the same port
   def cursor_get_more_test(read=:primary)
+    return if subject_to_server_4754?(@client)
     set_read_client_and_tag(read)
     10.times do
       # assert that the query went to the correct member
@@ -152,6 +158,7 @@ class ReplicaSetCursorTest < Test::Unit::TestCase
 
   # batch from get_more can be huge, so close after send_initial_query
   def kill_cursor_test(read=:primary)
+    return if subject_to_server_4754?(@client)
     set_read_client_and_tag(read)
     10.times do
       # assert that the query went to the correct member
@@ -171,6 +178,7 @@ class ReplicaSetCursorTest < Test::Unit::TestCase
   end
 
   def assert_cursors_on_members(read=:primary)
+    return if subject_to_server_4754?(@client)
     set_read_client_and_tag(read)
     # assert that the query went to the correct member
     route_query(read)

@@ -1,4 +1,4 @@
-# Copyright (C) 2013 10gen Inc.
+# Copyright (C) 2009-2013 MongoDB, Inc.
 #
 # Licensed under the Apache License, Version 2.0 (the "License");
 # you may not use this file except in compliance with the License.
@@ -20,8 +20,8 @@ module BSON
       ByteBuffer.new(CBson.serialize(obj, check_keys, move_id, max_bson_size))
     end
 
-    def self.deserialize(buf=nil)
-      CBson.deserialize(ByteBuffer.new(buf).to_s)
+    def self.deserialize(buf=nil, opts={})
+      CBson.deserialize(ByteBuffer.new(buf).to_s, opts)
     end
 
     def self.max_bson_size

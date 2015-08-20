@@ -1,4 +1,4 @@
-# Copyright (C) 2013 10gen Inc.
+# Copyright (C) 2009-2013 MongoDB, Inc.
 #
 # Licensed under the Apache License, Version 2.0 (the "License");
 # you may not use this file except in compliance with the License.
@@ -19,7 +19,7 @@ class SafeTest < Test::Unit::TestCase
   context "Safe mode propogation: " do
     setup do
       @connection = standard_connection({:safe => true}, true) # Legacy
-      @db         = @connection[MONGO_TEST_DB]
+      @db         = @connection[TEST_DB]
       @collection = @db['test-safe']
       @collection.create_index([[:a, 1]], :unique => true)
       @collection.remove
@@ -73,7 +73,7 @@ class SafeTest < Test::Unit::TestCase
   context "Safe error objects" do
     setup do
       @connection = standard_connection({:safe => true}, true) # Legacy
-      @db         = @connection[MONGO_TEST_DB]
+      @db         = @connection[TEST_DB]
       @collection = @db['test']
       @collection.remove
       @collection.insert({:a => 1})
@@ -85,8 +85,8 @@ class SafeTest < Test::Unit::TestCase
       response = @collection.update({:a => 1}, {"$set" => {:a => 2}},
                              :multi => true)
 
-      assert response['updatedExisting']
-      assert_equal 3, response['n']
+      assert(response['updatedExisting'] || @db.connection.wire_version_feature?(Mongo::MongoClient::BATCH_COMMANDS)) # TODO - review new write command return values
+      assert(response['n'] == 3 || @db.connection.wire_version_feature?(Mongo::MongoClient::BATCH_COMMANDS)) # TODO - update command top pending
     end
 
     should "return object on remove" do

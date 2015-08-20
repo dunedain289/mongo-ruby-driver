@@ -1,4 +1,4 @@
-# Copyright (C) 2013 10gen Inc.
+# Copyright (C) 2009-2013 MongoDB, Inc.
 #
 # Licensed under the Apache License, Version 2.0 (the "License");
 # you may not use this file except in compliance with the License.
@@ -13,34 +13,25 @@
 # limitations under the License.
 
 require 'test_helper'
-require 'shared/authentication'
+require 'shared/authentication/basic_auth_shared'
+require 'shared/authentication/sasl_plain_shared'
+require 'shared/authentication/bulk_api_auth_shared'
+require 'shared/authentication/gssapi_shared'
 
 class ReplicaSetAuthenticationTest < Test::Unit::TestCase
   include Mongo
-  include AuthenticationTests
+
+  include BasicAuthTests
+  include SASLPlainTests
+  include BulkAPIAuthTests
+  include GSSAPITests
 
   def setup
     ensure_cluster(:rs)
-    @client = MongoReplicaSetClient.new(@rs.repl_set_seeds, :name => @rs.repl_set_name, :connect_timeout => 60)
-    @db = @client[MONGO_TEST_DB]
-    init_auth
-  end
-
-  def test_authenticate_with_connection_uri
-    @db.add_user('eunice', 'uritest')
-
-    client =
-      MongoReplicaSetClient.from_uri(
-        "mongodb://eunice:uritest@#{@rs.repl_set_seeds.join(',')}/#{@db.name}" +
-        "?replicaSet=#{@rs.repl_set_name}")
-
-    assert client
-    assert_equal client.auths.size, 1
-    assert client[MONGO_TEST_DB]['auth_test'].count
-
-    auth = client.auths.first
-    assert_equal @db.name, auth[:db_name]
-    assert_equal 'eunice', auth[:username]
-    assert_equal 'uritest', auth[:password]
+    @client    = MongoReplicaSetClient.from_uri(@uri, :op_timeout => TEST_OP_TIMEOUT)
+    @admin     = @client['admin']
+    @version   = @client.server_version
+    @db        = @client['ruby-test']
+    @host_info = @rs.repl_set_seeds.join(',')
   end
 end

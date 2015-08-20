@@ -1,4 +1,4 @@
-# Copyright (C) 2013 10gen Inc.
+# Copyright (C) 2009-2013 MongoDB, Inc.
 #
 # Licensed under the Apache License, Version 2.0 (the "License");
 # you may not use this file except in compliance with the License.
@@ -14,14 +14,14 @@
 
 require 'test_helper'
 
-class BasicTest < Test::Unit::TestCase
+class ReplicaSetBasicTest < Test::Unit::TestCase
 
   def setup
     ensure_cluster(:rs)
   end
 
   def test_connect
-    client = MongoReplicaSetClient.new(@rs.repl_set_seeds, :name => @rs.repl_set_name)
+    client = MongoReplicaSetClient.new(@rs.repl_set_seeds, :name => @rs.repl_set_name, :op_timeout => TEST_OP_TIMEOUT)
     assert client.connected?
     assert_equal @rs.primary_name, client.primary.join(':')
     assert_equal @rs.secondary_names.sort, client.secondaries.collect{|s| s.join(':')}.sort
@@ -73,9 +73,7 @@ class BasicTest < Test::Unit::TestCase
   end
 
   def test_accessors
-    seeds = @rs.repl_set_seeds
-    args = {:name => @rs.repl_set_name}
-    client = MongoReplicaSetClient.new(seeds, args)
+    client = MongoReplicaSetClient.from_uri(@uri)
     assert_equal @rs.primary_name, [client.host, client.port].join(':')
     assert_equal client.host, client.primary_pool.host
     assert_equal client.port, client.primary_pool.port
@@ -88,30 +86,76 @@ class BasicTest < Test::Unit::TestCase
     client.close
   end
 
+  def test_write_commands_and_operations
+    @client = MongoReplicaSetClient.from_uri(@uri)
+    @coll = @client[TEST_DB]['test-write-commands-and-operations']
+    with_write_commands_and_operations(@client) do
+      @coll.remove
+      @coll.insert({:foo => "bar"})
+      assert_equal(1, @coll.count)
+    end
+  end
+
+  def test_wnote_does_not_raise_exception_with_err_nil
+    @client = MongoReplicaSetClient.from_uri(@uri)
+    if @client.server_version < '2.5.5'
+      @coll = @client[TEST_DB]['test-wnote']
+      begin
+        result = @coll.remove({:foo => 1}, :w => 2)
+      rescue => ex
+        assert(false, "should not raise an exception for a wnote response field from a remove that does not match any documents")
+      end
+      assert_nil result["err"]
+      assert_true result.has_key?("wnote")
+    end
+  end
+
+  def test_sockets_used_by_forked_process
+    @client = MongoReplicaSetClient.from_uri(@uri)
+    primary_node = @client.manager.primary_pool.node
+    primary_socket = primary_node.socket
+    primary_socket.instance_variable_set(:@pid, primary_socket.pid + 1)
+    primary_node.set_config
+    assert primary_socket != primary_node.socket
+  end
+
   context "Socket pools" do
     context "checking out writers" do
       setup do
-        seeds = @rs.repl_set_seeds
-        args = {:name => @rs.repl_set_name}
-        @client = MongoReplicaSetClient.new(seeds, args)
-        @coll = @client[MONGO_TEST_DB]['test-connection-exceptions']
+        @client = MongoReplicaSetClient.from_uri(@uri)
+        @coll = @client[TEST_DB]['test-connection-exceptions']
       end
 
       should "close the connection on send_message for major exceptions" do
-        @client.expects(:checkout_writer).raises(SystemStackError)
-        @client.expects(:close)
-        begin
-          @coll.insert({:foo => "bar"})
-        rescue SystemStackError
+        with_write_operations(@client) do # explicit even if w 0 maps to write operations
+          @client.expects(:checkout_writer).raises(SystemStackError)
+          @client.expects(:close)
+          begin
+            @coll.insert({:foo => "bar"}, :w => 0)
+          rescue SystemStackError
+          end
+        end
+      end
+
+      should "close the connection on send_write_command for major exceptions" do
+        with_write_commands(@client) do
+          @client.expects(:checkout_reader).raises(SystemStackError)
+          @client.expects(:close)
+          begin
+            @coll.insert({:foo => "bar"})
+          rescue SystemStackError
+          end
         end
       end
 
       should "close the connection on send_message_with_gle for major exceptions" do
-        @client.expects(:checkout_writer).raises(SystemStackError)
-        @client.expects(:close)
-        begin
-          @coll.insert({:foo => "bar"})
-        rescue SystemStackError
+        with_write_operations(@client) do
+          @client.expects(:checkout_writer).raises(SystemStackError)
+          @client.expects(:close)
+          begin
+            @coll.insert({:foo => "bar"})
+          rescue SystemStackError
+          end
         end
       end
 
@@ -127,10 +171,8 @@ class BasicTest < Test::Unit::TestCase
 
     context "checking out readers" do
       setup do
-        seeds = @rs.repl_set_seeds
-        args = {:name => @rs.repl_set_name}
-        @client = MongoReplicaSetClient.new(seeds, args)
-        @coll = @client[MONGO_TEST_DB]['test-connection-exceptions']
+        @client = MongoReplicaSetClient.from_uri(@uri)
+        @coll = @client[TEST_DB]['test-connection-exceptions']
       end
 
       should "close the connection on receive_message for major exceptions" do

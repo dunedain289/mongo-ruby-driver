@@ -1,4 +1,4 @@
-# Copyright (C) 2013 10gen Inc.
+# Copyright (C) 2009-2013 MongoDB, Inc.
 #
 # Licensed under the Apache License, Version 2.0 (the "License");
 # you may not use this file except in compliance with the License.
@@ -15,7 +15,7 @@
 require 'test_helper'
 include Mongo
 
-class ShardingPoolManagerTest < Test::Unit::TestCase
+class ShardingPoolManagerUnitTest < Test::Unit::TestCase
 
   context "Initialization: " do
 
@@ -45,8 +45,10 @@ class ShardingPoolManagerTest < Test::Unit::TestCase
       @ismaster = {
         'hosts' => @hosts,
         'arbiters' => @arbiters,
+        'maxBsonObjectSize' => 1024,
         'maxMessageSizeBytes' => 1024 * 2.5,
-        'maxBsonObjectSize' => 1024
+        'maxWireVersion' => 1,
+        'minWireVersion' => 0
       }
     end
 
@@ -58,8 +60,10 @@ class ShardingPoolManagerTest < Test::Unit::TestCase
 
         # Subsequent calls to configure pools.
         @ismaster.merge({'ismaster' => true}),
-        @ismaster.merge({'secondary' => true, 'maxMessageSizeBytes' => 700}),
         @ismaster.merge({'secondary' => true, 'maxBsonObjectSize' => 500}),
+        @ismaster.merge({'secondary' => true, 'maxMessageSizeBytes' => 700}),
+        @ismaster.merge({'secondary' => true, 'maxWireVersion' => 0}),
+        @ismaster.merge({'secondary' => true, 'minWireVersion' => 0}),
         @ismaster.merge({'arbiterOnly' => true})
       )
 
@@ -72,7 +76,9 @@ class ShardingPoolManagerTest < Test::Unit::TestCase
 
       assert manager.seeds.include? formatted_seed
       assert_equal 500, manager.max_bson_size
-      assert_equal 700 , manager.max_message_size
+      assert_equal 700, manager.max_message_size
+      assert_equal 0, manager.max_wire_version
+      assert_equal 0, manager.min_wire_version
     end
   end
 end

@@ -1,4 +1,4 @@
-# Copyright (C) 2013 10gen Inc.
+# Copyright (C) 2009-2013 MongoDB, Inc.
 #
 # Licensed under the Apache License, Version 2.0 (the "License");
 # you may not use this file except in compliance with the License.
@@ -21,10 +21,8 @@ module BSON
 
     # Create a DBRef. Use this class in conjunction with DB#dereference.
     #
-    # @param [String] a collection name
-    # @param [ObjectId] an object id
-    #
-    # @core dbrefs constructor_details
+    # @param [String] namespace a collection name.
+    # @param [ObjectId] object_id an object id.
     def initialize(namespace, object_id)
       @namespace = namespace
       @object_id = object_id

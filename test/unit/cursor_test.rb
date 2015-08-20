@@ -1,4 +1,4 @@
-# Copyright (C) 2013 10gen Inc.
+# Copyright (C) 2009-2013 MongoDB, Inc.
 #
 # Licensed under the Apache License, Version 2.0 (the "License");
 # you may not use this file except in compliance with the License.
@@ -14,7 +14,7 @@
 
 require 'test_helper'
 
-class CursorTest < Test::Unit::TestCase
+class CursorUnitTest < Test::Unit::TestCase
   class Mongo::Cursor
     public :construct_query_spec
   end
@@ -53,6 +53,18 @@ class CursorTest < Test::Unit::TestCase
       @cursor = Cursor.new(@collection, :fields => [:name, :date])
       assert_equal({:name => 1, :date => 1}, @cursor.fields)
       assert_equal({:name => 1, :date => 1}, @cursor.query_options_hash[:fields])
+    end
+
+    should "allow $meta projection operator" do
+      assert_nil @cursor.fields
+
+      @cursor = Cursor.new(@collection, :fields => [{ :score => { :$meta => 'textScore' } }])
+      assert_equal({ :score  => { :$meta => 'textScore' } }, @cursor.fields)
+      assert_equal({ :score  => { :$meta => 'textScore' } }, @cursor.query_options_hash[:fields])
+
+      @cursor = Cursor.new(@collection, :fields => [:name, { :score => { :$meta => 'textScore' } }])
+      assert_equal({ :name => 1, :score => { :$meta => 'textScore' } }, @cursor.fields)
+      assert_equal({ :name => 1, :score => { :$meta => 'textScore' } }, @cursor.query_options_hash[:fields])
     end
 
     should "set mix fields 0 and 1" do
@@ -126,7 +138,15 @@ class CursorTest < Test::Unit::TestCase
       assert_equal 100, @cursor.batch_size
     end
 
-    context "conected to mongos" do
+    context 'when an alternate namespace is specified' do
+
+      should 'use the alternate namespace' do
+        cursor = Cursor.new(@collection, :ns => 'other_db.other_collection')
+        assert_equal('other_db.other_collection', cursor.full_collection_name)
+      end
+    end
+
+    context "connected to mongos" do
       setup do
         @connection.stubs(:mongos?).returns(true)
         @tag_sets = [{:dc => "ny"}]
@@ -199,7 +219,7 @@ class CursorTest < Test::Unit::TestCase
       end
     end
 
-    context "not conected to mongos" do
+    context "not connected to mongos" do
       setup do
         @connection.stubs(:mongos?).returns(false)
       end

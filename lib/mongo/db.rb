@@ -1,4 +1,4 @@
-# Copyright (C) 2013 10gen Inc.
+# Copyright (C) 2009-2013 MongoDB, Inc.
 #
 # Licensed under the Apache License, Version 2.0 (the "License");
 # you may not use this file except in compliance with the License.
@@ -12,9 +12,6 @@
 # See the License for the specific language governing permissions and
 # limitations under the License.
 
-require 'socket'
-require 'thread'
-
 module Mongo
 
   # A MongoDB database.
@@ -27,6 +24,7 @@ module Mongo
     SYSTEM_USER_COLLECTION      = 'system.users'
     SYSTEM_JS_COLLECTION        = 'system.js'
     SYSTEM_COMMAND_COLLECTION   = '$cmd'
+    MAX_TIME_MS_CODE      = 50
 
     PROFILE_LEVEL = {
       :off       => 0,
@@ -63,7 +61,10 @@ module Mongo
     attr_reader :name, :write_concern
 
     # The Mongo::MongoClient instance connecting to the MongoDB server.
-    attr_reader :connection
+    attr_reader :client
+
+    # for backward compatibility
+    alias_method :connection, :client
 
     # The length of time that Collection.ensure_index should cache index calls
     attr_accessor :cache_time
@@ -87,10 +88,16 @@ module Mongo
     #   the factory should not inject a new key).
     #
     # @option opts [String, Integer, Symbol] :w (1) Set default number of nodes to which a write
-    #   should be acknowledged
-    # @option opts [Boolean] :j (false) Set journal acknowledgement
-    # @option opts [Integer] :wtimeout (nil) Set replica set acknowledgement timeout
-    # @option opts [Boolean] :fsync (false) Set fsync acknowledgement.
+    #   should be acknowledged.
+    # @option opts [Integer] :wtimeout (nil) Set replica set acknowledgement timeout.
+    # @option opts [Boolean] :j (false) If true, block until write operations have been committed
+    #   to the journal. Cannot be used in combination with 'fsync'. Prior to MongoDB 2.6 this option was
+    #   ignored if the server was running without journaling. Starting with MongoDB 2.6, write operations will
+    #   fail with an exception if this option is used when the server is running without journaling.
+    # @option opts [Boolean] :fsync (false) If true, and the server is running without journaling, blocks until
+    #   the server has synced all data files to disk. If the server is running with journaling, this acts the same as
+    #   the 'j' option, blocking until write operations have been committed to the journal.
+    #   Cannot be used in combination with 'j'.
     #
     #   Notes on write concern:
     #     These write concern options are propagated to Collection objects instantiated off of this DB. If no
@@ -99,81 +106,67 @@ module Mongo
     #     on initialization or at the time of an operation.
     #
     # @option opts [Integer] :cache_time (300) Set the time that all ensure_index calls should cache the command.
-    #
-    # @core databases constructor_details
+
     def initialize(name, client, opts={})
-      @name       = Mongo::Support.validate_db_name(name)
-      @connection = client
+      # A database name of '$external' is permitted for some auth types
+      Support.validate_db_name(name) unless name == '$external'
+
+      @name       = name
+      @client     = client
       @strict     = opts[:strict]
       @pk_factory = opts[:pk]
 
       @write_concern = get_write_concern(opts, client)
 
-      @read = opts[:read] || @connection.read
-      Mongo::ReadPreference::validate(@read)
-      @tag_sets = opts.fetch(:tag_sets, @connection.tag_sets)
-      @acceptable_latency = opts.fetch(:acceptable_latency, @connection.acceptable_latency)
+      @read = opts[:read] || @client.read
+      ReadPreference::validate(@read)
+
+      @tag_sets = opts.fetch(:tag_sets, @client.tag_sets)
+      @acceptable_latency = opts.fetch(:acceptable_latency,
+                                       @client.acceptable_latency)
+
       @cache_time = opts[:cache_time] || 300 #5 minutes.
     end
 
-    # Authenticate with the given username and password. Note that mongod
-    # must be started with the --auth option for authentication to be enabled.
+    # Authenticate with the given username and password.
     #
-    # @param [String] username
-    # @param [String] password
-    # @param [Boolean] save_auth
-    #   Save this authentication to the client object using MongoClient#add_auth. This
-    #   will ensure that the authentication will be applied to all sockets and upon
-    #   database reconnect.
-    # @param source [String] Database with user credentials. This should be used to
-    #   authenticate against a database when the credentials exist elsewhere.
+    # @param username [String] The username.
+    # @param password [String] The user's password. This is not required for
+    #   some authentication mechanisms.
+    # @param save_auth [Boolean]
+    #   Save this authentication to the client object using
+    #   MongoClient#add_auth. This will ensure that the authentication will
+    #   be applied to all sockets and upon database reconnect.
+    # @param source [String] Database with user credentials. This should be
+    #   used to authenticate against a database when the credentials exist
+    #   elsewhere.
+    # @param mechanism [String] The authentication mechanism to be used.
+    # @param extra [Hash] A optional hash of extra options to be stored with
+    #   the credential set.
     #
-    # @note save_auth must be true when using connection pooling or providing a source
-    #   for credentials.
+    # @note The ability to disable the save_auth option has been deprecated.
+    #   With save_auth=false specified, driver authentication behavior during
+    #   failovers and reconnections becomes unreliable. This option still
+    #   exists for API compatibility, but it no longer has any effect if
+    #   disabled and now always uses the default behavior (safe_auth=true).
     #
-    # @return [Boolean]
-    #
-    # @raise [AuthenticationError]
-    #
-    # @core authenticate authenticate-instance_method
-    def authenticate(username, password=nil, save_auth=true, source=nil)
-      if (@connection.pool_size > 1 || source) && !save_auth
-        raise MongoArgumentError, "If using connection pooling or delegated auth, " +
-          ":save_auth must be set to true."
-      end
-
-      begin
-        socket = @connection.checkout_reader(:mode => :primary_preferred)
-        issue_authentication(username, password, save_auth,
-          :socket => socket, :source => source)
-      ensure
-        socket.checkin if socket
-      end
-
-      @connection.authenticate_pools
+    # @raise [AuthenticationError] Raised if authentication fails.
+    # @return [Boolean] The result of the authentication operation.
+    def authenticate(username, password=nil, save_auth=nil, source=nil, mechanism=nil, extra=nil)
+      warn "[DEPRECATED] Disabling the 'save_auth' option no longer has " +
+           "any effect. Please see the API documentation for more details " +
+           "on this change." unless save_auth.nil?
+      @client.add_auth(self.name, username, password, source, mechanism, extra)
       true
     end
 
-    def issue_authentication(username, password, save_auth=true, opts={})
-      doc = command({:getnonce => 1}, :check_response => false, :socket => opts[:socket])
-      raise MongoDBError, "Error retrieving nonce: #{doc}" unless ok?(doc)
-      nonce = doc['nonce']
-
-      # issue authentication against this database if source option not provided
-      source = opts[:source]
-      db = source ? @connection[source] : self
-
-      auth = BSON::OrderedHash.new
-      auth['authenticate'] = 1
-      auth['user'] = username
-      auth['nonce'] = nonce
-      auth['key'] = Mongo::Support.auth_key(username, password, nonce)
-      if ok?(doc = db.command(auth, :check_response => false, :socket => opts[:socket]))
-        @connection.add_auth(name, username, password, source) if save_auth
-      else
-        message = "Failed to authenticate user '#{username}' on db '#{db.name}'"
-        raise Mongo::AuthenticationError.new(message, doc['code'], doc)
-      end
+    # Deauthorizes use for this database for this client connection. Also removes
+    # the saved authentication in the MongoClient class associated with this
+    # database.
+    #
+    # @return [Boolean]
+    def logout(opts={})
+      @client.remove_auth(self.name)
       true
     end
 
@@ -224,18 +217,26 @@ module Mongo
     #
     # @return [Hash] an object representing the user.
     def add_user(username, password=nil, read_only=false, opts={})
-      users = self[SYSTEM_USER_COLLECTION]
-      user  = users.find_one({:user => username}) || {:user => username}
-      user['pwd'] = Mongo::Support.hash_password(username, password) if password
-      user['readOnly'] = true if read_only
-      user.merge!(opts)
-      begin
-        users.save(user)
-      rescue OperationFailure => ex
-        # adding first admin user fails GLE in MongoDB 2.2
-        raise ex unless ex.message =~ /login/
+      user_info = command(:usersInfo => username)
+      if user_info.key?('users') && !user_info['users'].empty?
+        create_or_update_user(:updateUser, username, password, read_only, opts)
+      else
+        create_or_update_user(:createUser, username, password, read_only, opts)
       end
-      user
+        # MongoDB >= 2.5.3 requires the use of commands to manage users.
+        # "Command not found" error didn't return an error code (59) before
+        # MongoDB 2.4.7 so we assume that a nil error code means the usersInfo
+        # command doesn't exist and we should fall back to the legacy add user code.
+    rescue OperationFailure => ex
+      if Mongo::ErrorCode::COMMAND_NOT_FOUND_CODES.include?(ex.error_code)
+        legacy_add_user(username, password, read_only, opts)
+      elsif ex.error_code == Mongo::ErrorCode::UNAUTHORIZED
+        # In MongoDB > 2.7 the localhost exception was narrowed, and the usersInfo
+        # command is no longer allowed.  In this case, add the first user.
+        create_or_update_user(:createUser, username, password, read_only, opts)
+      else
+        raise ex
+      end
     end
 
     # Remove the given user from this database. Returns false if the user
@@ -245,41 +246,27 @@ module Mongo
     #
     # @return [Boolean]
     def remove_user(username)
-      if self[SYSTEM_USER_COLLECTION].find_one({:user => username})
-        self[SYSTEM_USER_COLLECTION].remove({:user => username}, :w => 1)
-      else
-        false
+      begin
+        command(:dropUser => username)
+      rescue OperationFailure => ex
+        raise ex unless Mongo::ErrorCode::COMMAND_NOT_FOUND_CODES.include?(ex.error_code)
+        response = self[SYSTEM_USER_COLLECTION].remove({:user => username}, :w => 1)
+        response.key?('n') && response['n'] > 0 ? response : false
       end
-    end
-
-    # Deauthorizes use for this database for this client connection. Also removes
-    # any saved authentication in the MongoClient class associated with this
-    # database.
-    #
-    # @raise [MongoDBError] if logging out fails.
-    #
-    # @return [Boolean]
-    def logout(opts={})
-      auth = @connection.auths.find { |a| a[:db_name] == name }
-      db = auth && auth[:source] ? @connection[auth[:source]] : self
-      auth ? @connection.logout_pools(db.name) : db.issue_logout(opts)
-      @connection.remove_auth(db.name)
-    end
-
-    def issue_logout(opts={})
-      unless ok?(doc = command({:logout => 1}, :socket => opts[:socket]))
-        raise MongoDBError, "Error logging out: #{doc.inspect}"
-      end
-      true
     end
 
     # Get an array of collection names in this database.
     #
     # @return [Array]
     def collection_names
-      names = collections_info.collect { |doc| doc['name'] || '' }
-      names = names.delete_if {|name| name.index(@name).nil? || name.index('$')}
-      names.map {|name| name.sub(@name + '.', '')}
+      if @client.wire_version_feature?(Mongo::MongoClient::MONGODB_3_0)
+        names = collections_info.collect { |doc| doc['name'] || '' }
+        names.delete_if do |name|
+          name.index('$')
+        end
+      else
+        legacy_collection_names
+      end
     end
 
     # Get an array of Collection instances, one for each collection in this database.
@@ -297,11 +284,31 @@ module Mongo
     #
     # @param [String] coll_name return info for the specified collection only.
     #
-    # @return [Mongo::Cursor]
+    # @return [Array] List of collection info.
     def collections_info(coll_name=nil)
-      selector = {}
-      selector[:name] = full_collection_name(coll_name) if coll_name
-      Cursor.new(Collection.new(SYSTEM_NAMESPACE_COLLECTION, self), :selector => selector)
+      if @client.wire_version_feature?(Mongo::MongoClient::MONGODB_3_0)
+        cmd = BSON::OrderedHash[:listCollections, 1]
+        cmd.merge!(:filter => { :name => coll_name }) if coll_name
+        result = self.command(cmd, :cursor => {})
+        if result.key?('cursor')
+          cursor_info = result['cursor']
+          pinned_pool = @client.pinned_pool
+          pinned_pool = pinned_pool[:pool] if pinned_pool.respond_to?(:keys)
+
+          seed = {
+            :cursor_id => cursor_info['id'],
+            :first_batch => cursor_info['firstBatch'],
+            :pool => pinned_pool,
+            :ns => cursor_info['ns']
+          }
+
+          Cursor.new(Collection.new('$cmd', self), seed).to_a
+        else
+          result['collections']
+        end
+      else
+        legacy_collections_info(coll_name).to_a
+      end
     end
 
     # Create a collection.
@@ -324,6 +331,9 @@ module Mongo
     # @raise [MongoDBError] raised under two conditions:
     #   either we're in +strict+ mode and the collection
     #   already exists or collection creation fails on the server.
+    #
+    # @note Note that the options listed may be subset of those available.
+    #   Please see the MongoDB documentation for a full list of supported options by server version.
     #
     # @return [Mongo::Collection]
     def create_collection(name, opts={})
@@ -451,6 +461,7 @@ module Mongo
 
       cmd = BSON::OrderedHash.new
       cmd[:$eval] = code
+      cmd.merge!(args.pop) if args.last.respond_to?(:keys) && args.last.key?(:nolock)
       cmd[:args] = args
       doc = command(cmd)
       doc['retval']
@@ -468,7 +479,7 @@ module Mongo
       cmd = BSON::OrderedHash.new
       cmd[:renameCollection] = "#{@name}.#{from}"
       cmd[:to] = "#{@name}.#{to}"
-      doc = DB.new('admin', @connection).command(cmd, :check_response => false)
+      doc = DB.new('admin', @client).command(cmd, :check_response => false)
       ok?(doc) || raise(MongoDBError, "Error renaming collection: #{doc.inspect}")
     end
 
@@ -497,19 +508,37 @@ module Mongo
     # @return [Hash] keys are index names and the values are lists of [key, type] pairs
     #   defining the index.
     def index_information(collection_name)
-      sel  = {:ns => full_collection_name(collection_name)}
-      info = {}
-      Cursor.new(Collection.new(SYSTEM_INDEX_COLLECTION, self), :selector => sel).each do |index|
-        info[index['name']] = index
+      if @client.wire_version_feature?(Mongo::MongoClient::MONGODB_3_0)
+        result = self.command({ :listIndexes => collection_name }, :cursor => {})
+        if result.key?('cursor')
+          cursor_info = result['cursor']
+          pinned_pool = @client.pinned_pool
+          pinned_pool = pinned_pool[:pool] if pinned_pool.respond_to?(:keys)
+
+          seed = {
+            :cursor_id => cursor_info['id'],
+            :first_batch => cursor_info['firstBatch'],
+            :pool => pinned_pool,
+            :ns => cursor_info['ns']
+          }
+
+          indexes = Cursor.new(Collection.new('$cmd', self), seed).to_a
+        else
+          indexes = result['indexes']
+        end
+      else
+        indexes = legacy_list_indexes(collection_name)
       end
-      info
+      indexes.reduce({}) do |info, index|
+        info.merge!(index['name'] => index)
+      end
     end
 
     # Return stats on this database. Uses MongoDB's dbstats command.
     #
     # @return [Hash]
     def stats
-      self.command({:dbstats => 1})
+      self.command(:dbstats => 1)
     end
 
     # Return +true+ if the supplied +doc+ contains an 'ok' field with the value 1.
@@ -531,8 +560,8 @@ module Mongo
     # to see how it works.
     #
     # @param [OrderedHash, Hash] selector an OrderedHash, or a standard Hash with just one
-    # key, specifying the command to be performed. In Ruby 1.9, OrderedHash isn't necessary since
-    # hashes are ordered by default.
+    # key, specifying the command to be performed. In Ruby 1.9 and above, OrderedHash isn't necessary
+    # because hashes are ordered by default.
     #
     # @option opts [Boolean] :check_response (true) If +true+, raises an exception if the
     #   command fails.
@@ -540,48 +569,62 @@ module Mongo
     # @option opts [:primary, :secondary] :read Read preference for this command. See Collection#find for
     #   more details.
     # @option opts [String]  :comment (nil) a comment to include in profiling logs
+    # @option opts [Boolean] :compile_regex (true) whether BSON regex objects should be compiled into Ruby regexes.
+    #   If false, a BSON::Regex object will be returned instead.
     #
     # @return [Hash]
-    #
-    # @core commands command_instance-method
     def command(selector, opts={})
-      check_response = opts.fetch(:check_response, true)
-      socket = opts[:socket]
-      raise MongoArgumentError, "Command must be given a selector" unless selector.is_a?(Hash) && !selector.empty?
+      raise MongoArgumentError, "Command must be given a selector" unless selector.respond_to?(:keys) && !selector.empty?
 
-      if selector.keys.length > 1 && RUBY_VERSION < '1.9' && selector.class != BSON::OrderedHash
-        raise MongoArgumentError, "DB#command requires an OrderedHash when hash contains multiple keys"
-      end
+      opts = opts.dup
+      # deletes :check_response and returns the value, if nil defaults to the block result
+      check_response = opts.delete(:check_response) { true }
 
-      if read_pref = opts[:read]
-        Mongo::ReadPreference::validate(read_pref)
-        unless read_pref == :primary || Mongo::Support::secondary_ok?(selector)
-          raise MongoArgumentError, "Command is not supported on secondaries: #{selector.keys.first}"
+      # build up the command hash
+      command = opts.key?(:socket) ? { :socket => opts.delete(:socket) } : {}
+      command.merge!(:comment => opts.delete(:comment)) if opts.key?(:comment)
+      command.merge!(:compile_regex => opts.delete(:compile_regex)) if opts.key?(:compile_regex)
+      command[:limit] = -1
+      command[:read] = Mongo::ReadPreference::cmd_read_pref(opts.delete(:read), selector) if opts.key?(:read)
+
+      if RUBY_VERSION < '1.9' && selector.class != BSON::OrderedHash
+        if selector.keys.length > 1
+          raise MongoArgumentError, "DB#command requires an OrderedHash when hash contains multiple keys"
+        end
+        if opts.keys.size > 0
+          # extra opts will be merged into the selector, so make sure it's an OH in versions < 1.9
+          selector = selector.dup
+          selector = BSON::OrderedHash.new.merge!(selector)
         end
       end
 
+      # arbitrary opts are merged into the selector
+      command[:selector] = selector.merge!(opts)
+
       begin
-        result = Cursor.new(
-          system_command_collection,
-          :limit => -1,
-          :selector => selector,
-          :socket => socket,
-          :read => read_pref,
-          :comment => opts[:comment]).next_document
+        result = Cursor.new(system_command_collection, command).next_document
       rescue OperationFailure => ex
-        raise OperationFailure, "Database command '#{selector.keys.first}' failed: #{ex.message}"
+        if check_response
+          raise ex.class.new("Database command '#{selector.keys.first}' failed: #{ex.message}", ex.error_code, ex.result)
+        else
+          result = ex.result
+        end
       end
 
       raise OperationFailure,
         "Database command '#{selector.keys.first}' failed: returned null." unless result
 
-      if check_response && !ok?(result)
+      if check_response && (!ok?(result) || result['writeErrors'] || result['writeConcernError'])
         message = "Database command '#{selector.keys.first}' failed: ("
         message << result.map do |key, value|
           "#{key}: '#{value}'"
         end.join('; ')
         message << ').'
         code = result['code'] || result['assertionCode']
+        if result['writeErrors']
+          code = result['writeErrors'].first['code']
+        end
+        raise ExecutionTimeout.new(message, code, result) if code == MAX_TIME_MS_CODE
         raise OperationFailure.new(message, code, result)
       end
 
@@ -618,8 +661,6 @@ module Mongo
     # get the results using DB#profiling_info.
     #
     # @return [Symbol] :off, :slow_only, or :all
-    #
-    # @core profiling profiling_level-instance_method
     def profiling_level
       cmd = BSON::OrderedHash.new
       cmd[:profile] = -1
@@ -676,6 +717,90 @@ module Mongo
 
     def system_command_collection
       Collection.new(SYSTEM_COMMAND_COLLECTION, self)
+    end
+
+    # Create a new user.
+    #
+    # @param username [String] The username.
+    # @param password [String] The user's password.
+    # @param read_only [Boolean] Create a read-only user (deprecated in MongoDB >= 2.6)
+    # @param opts [Hash]
+    #
+    # @private
+    def create_or_update_user(command, username, password, read_only, opts)
+      if read_only || !opts.key?(:roles)
+        warn "Creating a user with the read_only option or without roles is " +
+             "deprecated in MongoDB >= 2.6"
+      end
+
+      # The password is always salted and hashed by the driver.
+      if opts.key?(:digestPassword)
+        raise MongoArgumentError,
+          "The digestPassword option is not available via DB#add_user. " +
+          "Use DB#command(:createUser => ...) instead for this option."
+      end
+
+      opts = opts.dup
+      pwd = Mongo::Authentication.hash_password(username, password) if password
+      cmd_opts = pwd ? { :pwd => pwd } : {}
+      # specify that the server shouldn't digest the password because the driver does
+      cmd_opts[:digestPassword] = false
+      unless opts.key?(:roles)
+        if name == 'admin'
+          roles = read_only ? ['readAnyDatabase'] : ['root']
+        else
+          roles = read_only ? ['read'] : ["dbOwner"]
+        end
+        cmd_opts[:roles] = roles
+      end
+      cmd_opts[:writeConcern] =
+        opts.key?(:writeConcern) ? opts.delete(:writeConcern) : { :w => 1 }
+      cmd_opts.merge!(opts)
+      command({ command => username }, cmd_opts)
+    end
+
+    # Create a user in MongoDB versions < 2.5.3.
+    # Called by #add_user if the 'usersInfo' command fails.
+    #
+    # @param username [String] The username.
+    # @param password [String] (nil) The user's password.
+    # @param read_only [Boolean] (false) Create a read-only user.
+    # @param opts [Hash]
+    #
+    # @private
+    def legacy_add_user(username, password=nil, read_only=false, opts={})
+      users = self[SYSTEM_USER_COLLECTION]
+      user  = users.find_one(:user => username) || {:user => username}
+      user['pwd'] =
+        Mongo::Authentication.hash_password(username, password) if password
+      user['readOnly'] = true if read_only
+      user.merge!(opts)
+      begin
+        users.save(user)
+      rescue OperationFailure => ex
+        # adding first admin user fails GLE in MongoDB 2.2
+        raise ex unless ex.message =~ /login/
+      end
+      user
+    end
+
+    def legacy_list_indexes(collection_name)
+      sel  = {:ns => full_collection_name(collection_name)}
+      Cursor.new(Collection.new(SYSTEM_INDEX_COLLECTION, self), :selector => sel)
+    end
+
+    def legacy_collections_info(coll_name=nil)
+      selector = {}
+      selector[:name] = full_collection_name(coll_name) if coll_name
+      Cursor.new(Collection.new(SYSTEM_NAMESPACE_COLLECTION, self), :selector => selector)
+    end
+
+    def legacy_collection_names
+      names = legacy_collections_info.collect { |doc| doc['name'] || '' }
+      names = names.delete_if do |name|
+        name.index(@name).nil? || name.index('$')
+      end
+      names.map {|name| name.sub(@name + '.', '')}
     end
   end
 end

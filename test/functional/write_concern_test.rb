@@ -1,4 +1,4 @@
-# Copyright (C) 2013 10gen Inc.
+# Copyright (C) 2009-2013 MongoDB, Inc.
 #
 # Licensed under the Apache License, Version 2.0 (the "License");
 # you may not use this file except in compliance with the License.
@@ -19,7 +19,7 @@ class WriteConcernTest < Test::Unit::TestCase
   context "Write concern propogation: " do
     setup do
       @con = standard_connection
-      @db  = @con[MONGO_TEST_DB]
+      @db  = @con[TEST_DB]
       @col = @db['test-safe']
       @col.create_index([[:a, 1]], :unique => true)
       @col.remove
@@ -59,7 +59,7 @@ class WriteConcernTest < Test::Unit::TestCase
   context "Write concern error objects" do
     setup do
       @con = standard_connection
-      @db  = @con[MONGO_TEST_DB]
+      @db  = @con[TEST_DB]
       @col = @db['test']
       @col.remove
       @col.insert({:a => 1})
@@ -71,8 +71,8 @@ class WriteConcernTest < Test::Unit::TestCase
       response = @col.update({:a => 1}, {"$set" => {:a => 2}},
                              :multi => true)
 
-      assert response['updatedExisting']
-      assert_equal 3, response['n']
+      assert(response['updatedExisting'] || @db.connection.wire_version_feature?(Mongo::MongoClient::BATCH_COMMANDS)) # TODO - review new write command return values
+      assert(response['n'] == 3 || @db.connection.wire_version_feature?(Mongo::MongoClient::BATCH_COMMANDS)) # TODO - update command top pending
     end
 
     should "return object on remove" do
@@ -83,7 +83,7 @@ class WriteConcernTest < Test::Unit::TestCase
 
   context "Write concern in gridfs" do
     setup do
-      @db = standard_connection.db(MONGO_TEST_DB)
+      @db = standard_connection.db(TEST_DB)
       @grid = Mongo::GridFileSystem.new(@db)
       @filename = 'sample'
     end

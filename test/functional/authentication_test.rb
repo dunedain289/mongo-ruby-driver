@@ -1,4 +1,4 @@
-# Copyright (C) 2013 10gen Inc.
+# Copyright (C) 2009-2013 MongoDB, Inc.
 #
 # Licensed under the Apache License, Version 2.0 (the "License");
 # you may not use this file except in compliance with the License.
@@ -13,31 +13,27 @@
 # limitations under the License.
 
 require 'test_helper'
-require 'shared/authentication'
+require 'shared/authentication/basic_auth_shared'
+require 'shared/authentication/sasl_plain_shared'
+require 'shared/authentication/bulk_api_auth_shared'
+require 'shared/authentication/gssapi_shared'
+require 'shared/authentication/scram_shared'
+
 
 class AuthenticationTest < Test::Unit::TestCase
   include Mongo
-  include AuthenticationTests
+  include BasicAuthTests
+  include SASLPlainTests
+  include BulkAPIAuthTests
+  include GSSAPITests
+  include SCRAMTests
 
   def setup
-    @client = MongoClient.new
-    @db     = @client[MONGO_TEST_DB]
-    init_auth
-  end
-
-  def test_authenticate_with_connection_uri
-    @db.add_user('eunice', 'uritest')
-
-    client =
-      MongoClient.from_uri("mongodb://eunice:uritest@#{host_port}/#{@db.name}")
-
-    assert client
-    assert_equal client.auths.size, 1
-    assert client[MONGO_TEST_DB]['auth_test'].count
-
-    auth = client.auths.first
-    assert_equal @db.name, auth[:db_name]
-    assert_equal 'eunice', auth[:username]
-    assert_equal 'uritest', auth[:password]
+    @client    = standard_connection
+    omit("auth not enabled on mongod") unless auth_enabled?(@client)
+    @admin     = @client['admin']
+    @version   = @client.server_version
+    @db        = @client['ruby-test']
+    @host_info = host_port
   end
 end

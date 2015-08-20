@@ -1,4 +1,4 @@
-# Copyright (C) 2013 10gen Inc.
+# Copyright (C) 2009-2013 MongoDB, Inc.
 #
 # Licensed under the Apache License, Version 2.0 (the "License");
 # you may not use this file except in compliance with the License.
@@ -18,10 +18,12 @@ class ReplicaSetCountTest < Test::Unit::TestCase
 
   def setup
     ensure_cluster(:rs)
-    @client = MongoReplicaSetClient.new(@rs.repl_set_seeds, :read => :primary_preferred)
+    @client = MongoReplicaSetClient.new(@rs.repl_set_seeds, :read => :primary_preferred, :op_timeout => TEST_OP_TIMEOUT)
+    authenticate_client(@client)
     assert @client.primary_pool
     @primary = MongoClient.new(@client.primary_pool.host, @client.primary_pool.port)
-    @db = @client.db(MONGO_TEST_DB)
+    authenticate_client(@primary)
+    @db = @client.db(TEST_DB)
     @db.drop_collection("test-sets")
     @coll = @db.collection("test-sets")
   end

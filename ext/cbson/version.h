@@ -1,5 +1,5 @@
 /*
- * Copyright (C) 2013 10gen Inc.
+ * Copyright (C) 2009-2013 MongoDB, Inc.
  *
  * Licensed under the Apache License, Version 2.0 (the "License");
  * you may not use this file except in compliance with the License.
@@ -14,4 +14,4 @@
  * limitations under the License.
  */
 
-#define VERSION "1.9.2"
+#define VERSION "1.12.3"

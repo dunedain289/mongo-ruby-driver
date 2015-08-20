@@ -1,4 +1,4 @@
-# Copyright (C) 2013 10gen Inc.
+# Copyright (C) 2009-2013 MongoDB, Inc.
 #
 # Licensed under the Apache License, Version 2.0 (the "License");
 # you may not use this file except in compliance with the License.
@@ -23,7 +23,7 @@ def insert_message(db, documents)
   message = db.add_message_headers(Mongo::Constants::OP_INSERT, message)
 end
 
-class DBTest < Test::Unit::TestCase
+class DBUnitTest < Test::Unit::TestCase
   context "DBTest: " do
     context "DB commands" do
       setup do
@@ -32,6 +32,7 @@ class DBTest < Test::Unit::TestCase
         @client.stubs(:read).returns(:primary)
         @client.stubs(:tag_sets)
         @client.stubs(:acceptable_latency)
+        @client.stubs(:add_auth).returns({})
         @db = DB.new("testing", @client)
         @db.stubs(:safe)
         @db.stubs(:read)
@@ -55,11 +56,18 @@ class DBTest < Test::Unit::TestCase
         end
       end
 
+      should "not include named nil opts in selector" do
+        @cursor = mock(:next_document => {"ok" => 1})
+        Cursor.expects(:new).with(@collection, :limit => -1,
+          :selector => {:ping => 1}, :socket => nil).returns(@cursor)
+        command = {:ping => 1}
+        @db.command(command, :socket => nil)
+      end
+
       should "create the proper cursor" do
         @cursor = mock(:next_document => {"ok" => 1})
         Cursor.expects(:new).with(@collection,
-          :limit => -1, :selector => {:buildinfo => 1},
-          :socket => nil, :read => nil, :comment => nil).returns(@cursor)
+          :limit => -1, :selector => {:buildinfo => 1}).returns(@cursor)
         command = {:buildinfo => 1}
         @db.command(command, :check_response => true)
       end
@@ -67,8 +75,7 @@ class DBTest < Test::Unit::TestCase
       should "raise an error when the command fails" do
         @cursor = mock(:next_document => {"ok" => 0})
         Cursor.expects(:new).with(@collection,
-          :limit => -1, :selector => {:buildinfo => 1},
-          :socket => nil, :read => nil, :comment => nil).returns(@cursor)
+          :limit => -1, :selector => {:buildinfo => 1}).returns(@cursor)
         assert_raise OperationFailure do
           command = {:buildinfo => 1}
           @db.command(command, :check_response => true)
@@ -79,18 +86,10 @@ class DBTest < Test::Unit::TestCase
         @cursor = mock(:next_document => {"ok" => 0})
         Cursor.expects(:new).with(@collection,
           :limit => -1, :selector => {:buildinfo => 1},
-          :socket => nil, :read => nil, :comment => "my comment").returns(@cursor)
+          :comment => "my comment").returns(@cursor)
         assert_raise OperationFailure do
           command = {:buildinfo => 1}
           @db.command(command, :check_response => true, :comment => 'my comment')
-        end
-      end
-
-      should "raise an error if logging out fails" do
-        @db.expects(:command).returns({})
-        @client.expects(:auths).returns([])
-        assert_raise Mongo::MongoDBError do
-          @db.logout
         end
       end
 
@@ -120,6 +119,17 @@ class DBTest < Test::Unit::TestCase
         assert_raise Mongo::MongoDBError do
           @db.profiling_level = :slow_only
         end
+      end
+
+      should "warn when save_auth is not nil" do
+        assert @db.expects(:warn).with(regexp_matches(/\[DEPRECATED\] Disabling the 'save_auth' option/))
+        @db.authenticate('foo', 'bar', false)
+      end
+
+      should "allow extra authentication options" do
+        extra_opts = { :service_name => 'example', :canonicalize_host_name => true }
+        assert @client.expects(:add_auth).with(@db.name, 'emily', nil, nil, 'GSSAPI', extra_opts)
+        @db.authenticate('emily', nil, nil, nil, 'GSSAPI', extra_opts)
       end
     end
   end

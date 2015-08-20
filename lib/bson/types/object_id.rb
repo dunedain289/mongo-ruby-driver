@@ -1,4 +1,4 @@
-# Copyright (C) 2013 10gen Inc.
+# Copyright (C) 2009-2013 MongoDB, Inc.
 #
 # Licensed under the Apache License, Version 2.0 (the "License");
 # you may not use this file except in compliance with the License.
@@ -12,9 +12,8 @@
 # See the License for the specific language governing permissions and
 # limitations under the License.
 
-require 'thread'
-require 'socket'
 require 'digest/md5'
+require 'socket'
 
 module BSON
 
@@ -23,8 +22,6 @@ module BSON
   end
 
   # Generates MongoDB object ids.
-  #
-  # @core objectids
   class ObjectId
     attr_accessor :data
 
@@ -54,7 +51,7 @@ module BSON
     #
     # @return [Boolean]
     def self.legal?(str)
-      str =~ /^[0-9a-f]{24}$/i ? true : false
+      str =~ /\A[0-9a-f]{24}\z/i ? true : false
     end
 
     # Create an object id from the given time. This is useful for doing range

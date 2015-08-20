@@ -1,4 +1,4 @@
-# Copyright (C) 2013 10gen Inc.
+# Copyright (C) 2009-2013 MongoDB, Inc.
 #
 # Licensed under the Apache License, Version 2.0 (the "License");
 # you may not use this file except in compliance with the License.
@@ -18,7 +18,7 @@ class GridIOTest < Test::Unit::TestCase
 
   context "GridIO" do
     setup do
-      @db = standard_connection.db(MONGO_TEST_DB)
+      @db = standard_connection.db(TEST_DB)
       @files  = @db.collection('fs.files')
       @chunks = @db.collection('fs.chunks')
       @chunks.create_index([['files_id', Mongo::ASCENDING], ['n', Mongo::ASCENDING]])
@@ -35,9 +35,9 @@ class GridIOTest < Test::Unit::TestCase
         @mode     = 'w'
       end
 
-      should "set default 256k chunk size" do
+      should "set default 255k chunk size" do
         file = GridIO.new(@files, @chunks, @filename, @mode)
-        assert_equal 256 * 1024, file.chunk_size
+        assert_equal 255 * 1024, file.chunk_size
       end
 
       should "set chunk size" do

@@ -4,12 +4,27 @@ rvm:
   - 1.8.7
   - 1.9.3
   - 2.0.0
+  - 2.1.0
+  - ruby-head
   - jruby-18mode
   - jruby-19mode
+  - jruby-head
 
-bundler_args: --without deploy development
+jdk:
+  - oraclejdk7
+  - openjdk7
 
-env: TRAVIS_TEST="true"
+# uncomment this when these issues are resolved:
+# https://github.com/travis-ci/travis-ci/issues/2226
+# https://github.com/wayneeseguin/rvm/issues/2820
+#bundler_args: --without deploy development
+
+# delete this when the issue referenced above is resolved
+install: ruby -S bundle install --without deploy development
+
+before_install: rm -f Gemfile.lock
+
+env: TRAVIS_CI="true" JRUBY_OPTS="-J-Xmn1024m -J-Xms2048m -J-Xmx2048m"
 
 script: bundle exec rake test
 
@@ -22,7 +37,28 @@ services:
 
 branches:
   only:
-    - 2.x-development
     - master
     - 1.x-stable
     - 2.x-stable
+
+matrix:
+  allow_failures:
+    - rvm: ruby-head
+    - rvm: jruby-head
+    - rvm: 2.1.0
+  exclude:
+    - rvm: 1.8.7
+      jdk: openjdk7
+      env: TRAVIS_CI="true" JRUBY_OPTS="-J-Xmn1024m -J-Xms2048m -J-Xmx2048m"
+    - rvm: 1.9.3
+      jdk: openjdk7
+      env: TRAVIS_CI="true" JRUBY_OPTS="-J-Xmn1024m -J-Xms2048m -J-Xmx2048m"
+    - rvm: 2.0.0
+      jdk: openjdk7
+      env: TRAVIS_CI="true" JRUBY_OPTS="-J-Xmn1024m -J-Xms2048m -J-Xmx2048m"
+    - rvm: 2.1.0
+      jdk: openjdk7
+      env: TRAVIS_CI="true" JRUBY_OPTS="-J-Xmn1024m -J-Xms2048m -J-Xmx2048m"
+    - rvm: ruby-head
+      jdk: openjdk7
+      env: TRAVIS_CI="true" JRUBY_OPTS="-J-Xmn1024m -J-Xms2048m -J-Xmx2048m"

@@ -1,4 +1,4 @@
-# Copyright (C) 2013 10gen Inc.
+# Copyright (C) 2009-2013 MongoDB, Inc.
 #
 # Licensed under the Apache License, Version 2.0 (the "License");
 # you may not use this file except in compliance with the License.
@@ -15,7 +15,7 @@
 require 'test_helper'
 include Mongo
 
-class PoolManagerTest < Test::Unit::TestCase
+class PoolManagerUnitTest < Test::Unit::TestCase
 
   context "Initialization: " do
 
@@ -47,8 +47,10 @@ class PoolManagerTest < Test::Unit::TestCase
       @ismaster = {
         'hosts' => @hosts,
         'arbiters' => @arbiters,
+        'maxBsonObjectSize' => 1024,
         'maxMessageSizeBytes' => 1024 * 2.5,
-        'maxBsonObjectSize' => 1024
+        'maxWireVersion' => 1,
+        'minWireVersion' => 0
       }
     end
 
@@ -60,8 +62,8 @@ class PoolManagerTest < Test::Unit::TestCase
 
         # Subsequent calls to configure pools.
         @ismaster.merge({'ismaster' => true}),
-        @ismaster.merge({'secondary' => true, 'maxMessageSizeBytes' => 700}),
         @ismaster.merge({'secondary' => true, 'maxBsonObjectSize' => 500}),
+        @ismaster.merge({'secondary' => true, 'maxMessageSizeBytes' => 700}),
         @ismaster.merge({'arbiterOnly' => true})
       )
 
@@ -76,7 +78,7 @@ class PoolManagerTest < Test::Unit::TestCase
       assert_equal [27018, 27019], manager.secondary_pools.map(&:port).sort
       assert_equal [['localhost', 27020]], manager.arbiters
       assert_equal 500, manager.max_bson_size
-      assert_equal 700 , manager.max_message_size
+      assert_equal 700, manager.max_message_size
     end
 
     should "populate pools with single unqueryable seed" do

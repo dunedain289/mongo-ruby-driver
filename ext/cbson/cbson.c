@@ -1,5 +1,5 @@
 /*
- * Copyright (C) 2013 10gen Inc.
+ * Copyright (C) 2009-2013 MongoDB, Inc.
  *
  * Licensed under the Apache License, Version 2.0 (the "License");
  * you may not use this file except in compliance with the License.
@@ -22,6 +22,7 @@
 
 #include "ruby.h"
 #include "version.h"
+#include <arpa/inet.h>
 
 /* Ensure compatibility with early releases of Ruby 1.8.5 */
 #ifndef RSTRING_PTR
@@ -89,6 +90,13 @@ static VALUE MinKey;
 static VALUE MaxKey;
 static VALUE Timestamp;
 static VALUE Regexp;
+static VALUE BSONRegex;
+static VALUE BSONRegex_IGNORECASE;
+static VALUE BSONRegex_EXTENDED;
+static VALUE BSONRegex_MULTILINE;
+static VALUE BSONRegex_DOTALL;
+static VALUE BSONRegex_LOCALE_DEPENDENT;
+static VALUE BSONRegex_UNICODE;
 static VALUE OrderedHash;
 static VALUE InvalidKeyName;
 static VALUE InvalidStringEncoding;
@@ -99,12 +107,16 @@ static VALUE RB_HASH;
 
 static int max_bson_size;
 
+struct deserialize_opts {
+    int compile_regex;
+};
+
 #if HAVE_RUBY_ENCODING_H
 #include "ruby/encoding.h"
 #define STR_NEW(p,n)                                                    \
     ({                                                                  \
         VALUE _str = rb_enc_str_new((p), (n), rb_utf8_encoding());      \
-        rb_encoding* internal_encoding = rb_default_internal_encoding(); \
+        rb_encoding* internal_encoding = rb_default_internal_encoding();\
         if (internal_encoding) {                                        \
             _str = rb_str_export_to_enc(_str, internal_encoding);       \
         }                                                               \
@@ -139,8 +151,6 @@ static void write_utf8(bson_buffer_t buffer, VALUE string, int allow_null) {
 #define EXTENDED RE_OPTION_EXTENDED
 #endif
 
-/* TODO we ought to check that the malloc or asprintf was successful
- * and raise an exception if not. */
 /* TODO maybe we can use something more portable like vsnprintf instead
  * of this hack. And share it with the Python extension ;) */
 /* If we don't have ASPRINTF, there are two possibilities:
@@ -152,20 +162,32 @@ static void write_utf8(bson_buffer_t buffer, VALUE string, int allow_null) {
     {                                           \
         int vslength = _scprintf("%d", i) + 1;  \
         *buffer = malloc(vslength);             \
+        if (buffer == NULL) {                   \
+            rb_raise(rb_eNoMemError, "failed to allocate memory in INT2STRING");  \
+        }                                       \
         _snprintf(*buffer, vslength, "%d", i);  \
     }
 #define FREE_INTSTRING(buffer) free(buffer)
 #else
-#define INT2STRING(buffer, i)                   \
-    {                                           \
+#define INT2STRING(buffer, i)                           \
+    {                                                   \
         int vslength = snprintf(NULL, 0, "%d", i) + 1;  \
         *buffer = malloc(vslength);             \
+        if (buffer == NULL) {                   \
+            rb_raise(rb_eNoMemError, "failed to allocate memory in INT2STRING");  \
+        }                                       \
         snprintf(*buffer, vslength, "%d", i);   \
     }
 #define FREE_INTSTRING(buffer) free(buffer)
 #endif
 #else
-#define INT2STRING(buffer, i) asprintf(buffer, "%d", i);
+#define INT2STRING(buffer, i)                   \
+    {                                           \
+        int length = asprintf(buffer, "%d", i); \
+        if (length == -1) {                     \
+            rb_raise(rb_eNoMemError, "failed to allocate memory in INT2STRING");  \
+        }                                       \
+    }
 #ifdef USING_SYSTEM_ALLOCATOR_LIBRARY /* Ruby Enterprise Edition with tcmalloc */
 #define FREE_INTSTRING(buffer) system_free(buffer)
 #else
@@ -195,7 +217,7 @@ static int cmp_char(const void* a, const void* b) {
 static void write_doc(bson_buffer_t buffer, VALUE hash, VALUE check_keys, VALUE move_id);
 static int write_element_with_id(VALUE key, VALUE value, VALUE extra);
 static int write_element_without_id(VALUE key, VALUE value, VALUE extra);
-static VALUE elements_to_hash(const char* buffer, int max);
+static VALUE elements_to_hash(const char* buffer, int max, struct deserialize_opts * opts);
 
 static VALUE pack_extra(bson_buffer_t buffer, VALUE check_keys) {
     return rb_ary_new3(2, LL2NUM((long long)buffer), check_keys);
@@ -205,6 +227,79 @@ static void write_name_and_type(bson_buffer_t buffer, VALUE name, char type) {
     SAFE_WRITE(buffer, &type, 1);
     write_utf8(buffer, name, 0);
     SAFE_WRITE(buffer, &zero, 1);
+}
+
+static void serialize_regex(bson_buffer_t buffer, VALUE key, VALUE pattern, long flags, VALUE value, int native) {
+
+    VALUE has_extra;
+
+    write_name_and_type(buffer, key, 0x0B);
+
+    write_utf8(buffer, pattern, 0);
+    SAFE_WRITE(buffer, &zero, 1);
+
+    if (native == 1) {
+        // Ruby regular expressions always use multiline mode
+        char multiline = 'm';
+        SAFE_WRITE(buffer, &multiline, 1);
+
+        if (flags & IGNORECASE) {
+            char ignorecase = 'i';
+            SAFE_WRITE(buffer, &ignorecase, 1);
+        }
+
+        // dotall on the server is multiline in Ruby
+        if (flags & MULTILINE) {
+            char dotall = 's';
+            SAFE_WRITE(buffer, &dotall, 1);
+        }
+
+        if (flags & EXTENDED) {
+            char extended = 'x';
+            SAFE_WRITE(buffer, &extended, 1);
+        }
+    }
+    else {
+        if (flags & BSONRegex_IGNORECASE) {
+            char ignorecase = 'i';
+            SAFE_WRITE(buffer, &ignorecase, 1);
+        }
+
+        if (flags & BSONRegex_LOCALE_DEPENDENT) {
+            char locale_dependent = 'l';
+            SAFE_WRITE(buffer, &locale_dependent, 1);
+        }
+
+        if (flags & BSONRegex_MULTILINE) {
+            char multiline = 'm';
+            SAFE_WRITE(buffer, &multiline, 1);
+        }
+
+        if (flags & BSONRegex_DOTALL) {
+            char dotall = 's';
+            SAFE_WRITE(buffer, &dotall, 1);
+        }
+
+        if (flags & BSONRegex_UNICODE) {
+            char unicode = 'u';
+            SAFE_WRITE(buffer, &unicode, 1);
+        }
+
+        if (flags & BSONRegex_EXTENDED) {
+            char extended = 'x';
+            SAFE_WRITE(buffer, &extended, 1);
+        }
+    }
+
+    has_extra = rb_funcall(value, rb_intern("respond_to?"), 1, rb_str_new2("extra_options_str"));
+    if (TYPE(has_extra) == T_TRUE) {
+         VALUE extra = rb_funcall(value, rb_intern("extra_options_str"), 0);
+         bson_buffer_position old_position = bson_buffer_get_position(buffer);
+         SAFE_WRITE(buffer, RSTRING_PTR(extra), RSTRING_LENINT(extra));
+         qsort(bson_buffer_get_buffer(buffer) + old_position, RSTRING_LEN(extra), sizeof(char), cmp_char);
+    }
+    SAFE_WRITE(buffer, &zero, 1);
+
 }
 
 static int write_element(VALUE key, VALUE value, VALUE extra, int allow_id) {
@@ -351,10 +446,10 @@ static int write_element(VALUE key, VALUE value, VALUE extra, int allow_id) {
             const char* cls = rb_obj_classname(value);
             if (strcmp(cls, "BSON::Binary") == 0 ||
                 strcmp(cls, "ByteBuffer") == 0) {
-                const char subtype = strcmp(cls, "ByteBuffer") ?
-                    (const char)FIX2INT(rb_funcall(value, rb_intern("subtype"), 0)) : 2;
                 VALUE string_data = rb_funcall(value, rb_intern("to_s"), 0);
                 int length = RSTRING_LENINT(string_data);
+                const char subtype = strcmp(cls, "ByteBuffer") ?
+                    (const char)FIX2INT(rb_funcall(value, rb_intern("subtype"), 0)) : 2;
                 write_name_and_type(buffer, key, 0x05);
                 if (subtype == 2) {
                     const int other_length = length + 4;
@@ -369,8 +464,8 @@ static int write_element(VALUE key, VALUE value, VALUE extra, int allow_id) {
                 break;
             }
             if (strcmp(cls, "BSON::ObjectId") == 0) {
-                VALUE as_array = rb_funcall(value, rb_intern("to_a"), 0);
                 int i;
+                VALUE as_array = rb_funcall(value, rb_intern("to_a"), 0);
                 write_name_and_type(buffer, key, 0x07);
                 for (i = 0; i < 12; i++) {
                     char byte = (char)FIX2INT(rb_ary_entry(as_array, i));
@@ -468,6 +563,11 @@ static int write_element(VALUE key, VALUE value, VALUE extra, int allow_id) {
                 SAFE_WRITE(buffer, &zero, 1);
                 break;
             }
+            if (strcmp(cls, "BSON::Regex") == 0) {
+                serialize_regex(buffer, key, rb_funcall(value, rb_intern("pattern"), 0),
+                    FIX2INT(rb_funcall(value, rb_intern("options"), 0)), value, 0);
+                break;
+            }
             bson_buffer_free(buffer);
             rb_raise(InvalidDocument, "Cannot serialize an object of class %s into BSON.", cls);
             break;
@@ -501,37 +601,7 @@ static int write_element(VALUE key, VALUE value, VALUE extra, int allow_id) {
         {
             VALUE pattern = RREGEXP_SRC(value);
             long flags = RREGEXP_OPTIONS(value);
-            VALUE has_extra;
-
-            write_name_and_type(buffer, key, 0x0B);
-
-            write_utf8(buffer, pattern, 0);
-            SAFE_WRITE(buffer, &zero, 1);
-
-            if (flags & IGNORECASE) {
-                char ignorecase = 'i';
-                SAFE_WRITE(buffer, &ignorecase, 1);
-            }
-            if (flags & MULTILINE) {
-                char multiline = 'm';
-                char dotall = 's';
-                SAFE_WRITE(buffer, &multiline, 1);
-                SAFE_WRITE(buffer, &dotall, 1);
-            }
-            if (flags & EXTENDED) {
-                char extended = 'x';
-                SAFE_WRITE(buffer, &extended, 1);
-            }
-
-            has_extra = rb_funcall(value, rb_intern("respond_to?"), 1, rb_str_new2("extra_options_str"));
-            if (TYPE(has_extra) == T_TRUE) {
-                VALUE extra = rb_funcall(value, rb_intern("extra_options_str"), 0);
-                bson_buffer_position old_position = bson_buffer_get_position(buffer);
-                SAFE_WRITE(buffer, RSTRING_PTR(extra), RSTRING_LENINT(extra));
-                qsort(bson_buffer_get_buffer(buffer) + old_position, RSTRING_LEN(extra), sizeof(char), cmp_char);
-            }
-            SAFE_WRITE(buffer, &zero, 1);
-
+            serialize_regex(buffer, key, pattern, flags, value, 1);
             break;
         }
     default:
@@ -599,9 +669,10 @@ static void write_doc(bson_buffer_t buffer, VALUE hash, VALUE check_keys, VALUE 
 
     // we have to check for an OrderedHash and handle that specially
     if (strcmp(rb_obj_classname(hash), "BSON::OrderedHash") == 0) {
-        VALUE keys = rb_funcall(hash, rb_intern("keys"), 0);
         int i;
-                for(i = 0; i < RARRAY_LEN(keys); i++) {
+        VALUE keys = rb_funcall(hash, rb_intern("keys"), 0);
+
+        for(i = 0; i < RARRAY_LEN(keys); i++) {
             VALUE key = rb_ary_entry(keys, i);
             VALUE value = rb_hash_aref(hash, key);
 
@@ -648,10 +719,11 @@ static VALUE method_serialize(VALUE self, VALUE doc, VALUE check_keys,
     return result;
 }
 
-static VALUE get_value(const char* buffer, int* position, int type) {
+static VALUE get_value(const char* buffer, int* position,
+                       unsigned char type, struct deserialize_opts * opts) {
     VALUE value;
     switch (type) {
-    case -1:
+    case 255:
         {
             value = rb_class_new_instance(0, NULL, MinKey);
             break;
@@ -679,20 +751,21 @@ static VALUE get_value(const char* buffer, int* position, int type) {
             int size;
             memcpy(&size, buffer + *position, 4);
             if (strcmp(buffer + *position + 5, "$ref") == 0) { // DBRef
-                int offset = *position + 10;
                 VALUE argv[2];
+                unsigned char id_type;
+                int offset = *position + 10;
                 int collection_length = *(int*)(buffer + offset) - 1;
-                char id_type;
+
                 offset += 4;
 
                 argv[0] = STR_NEW(buffer + offset, collection_length);
                 offset += collection_length + 1;
-                id_type = buffer[offset];
+                id_type = (unsigned char)buffer[offset];
                 offset += 5;
-                argv[1] = get_value(buffer, &offset, (int)id_type);
+                argv[1] = get_value(buffer, &offset, id_type, opts);
                 value = rb_class_new_instance(2, argv, DBRef);
             } else {
-                value = elements_to_hash(buffer + *position + 4, size - 5);
+                value = elements_to_hash(buffer + *position + 4, size - 5, opts);
             }
             *position += size;
             break;
@@ -706,12 +779,12 @@ static VALUE get_value(const char* buffer, int* position, int type) {
 
             value = rb_ary_new();
             while (*position < end) {
-                int type = (int)buffer[(*position)++];
-                int key_size = (int)strlen(buffer + *position);
                 VALUE to_append;
+                unsigned char type = (unsigned char)buffer[(*position)++];
+                int key_size = (int)strlen(buffer + *position);
 
                 *position += key_size + 1; // just skip the key, they're in order.
-                to_append = get_value(buffer, position, type);
+                to_append = get_value(buffer, position, type, opts);
                 rb_ary_push(value, to_append);
             }
             (*position)++;
@@ -786,29 +859,19 @@ static VALUE get_value(const char* buffer, int* position, int type) {
         {
             int pattern_length = (int)strlen(buffer + *position);
             VALUE pattern = STR_NEW(buffer + *position, pattern_length);
-            int flags_length, flags = 0, i = 0;
-            VALUE argv[3];
+            int flags_length;
+            VALUE argv[3], flags_str;
             *position += pattern_length + 1;
 
             flags_length = (int)strlen(buffer + *position);
-            for (i = 0; i < flags_length; i++) {
-                char flag = buffer[*position + i];
-                if (flag == 'i') {
-                    flags |= IGNORECASE;
-                }
-                else if (flag == 'm') {
-                    flags |= MULTILINE;
-                }
-                else if (flag == 's') {
-                    flags |= MULTILINE;
-                }
-                else if (flag == 'x') {
-                    flags |= EXTENDED;
-                }
-            }
+            flags_str = STR_NEW(buffer + *position, flags_length);
             argv[0] = pattern;
-            argv[1] = INT2FIX(flags);
-            value = rb_class_new_instance(2, argv, Regexp);
+            argv[1] = flags_str;
+            value = rb_class_new_instance(2, argv, BSONRegex);
+
+            if (opts->compile_regex == 1) {
+                value = rb_funcall(value, rb_intern("try_compile"), 0);
+            }
             *position += flags_length + 1;
             break;
         }
@@ -850,7 +913,7 @@ static VALUE get_value(const char* buffer, int* position, int type) {
             *position += code_length + 1;
 
             memcpy(&scope_size, buffer + *position, 4);
-            scope = elements_to_hash(buffer + *position + 4, scope_size - 5);
+            scope = elements_to_hash(buffer + *position + 4, scope_size - 5, opts);
             *position += scope_size;
 
             argv[0] = code;
@@ -900,30 +963,37 @@ static VALUE get_value(const char* buffer, int* position, int type) {
     return value;
 }
 
-static VALUE elements_to_hash(const char* buffer, int max) {
-    VALUE hash = rb_class_new_instance(0, NULL, OrderedHash);
+static VALUE elements_to_hash(const char* buffer, int max, struct deserialize_opts * opts) {
     int position = 0;
+    VALUE hash = rb_class_new_instance(0, NULL, OrderedHash);
     while (position < max) {
-        int type = (int)buffer[position++];
+        VALUE value;
+        unsigned char type = (unsigned char)buffer[position++];
         int name_length = (int)strlen(buffer + position);
         VALUE name = STR_NEW(buffer + position, name_length);
-        VALUE value;
         position += name_length + 1;
-        value = get_value(buffer, &position, type);
+        value = get_value(buffer, &position, type, opts);
         rb_funcall(hash, element_assignment_method, 2, name, value);
     }
     return hash;
 }
 
-static VALUE method_deserialize(VALUE self, VALUE bson) {
+static VALUE method_deserialize(VALUE self, VALUE bson, VALUE opts) {
     const char* buffer = RSTRING_PTR(bson);
     int remaining = RSTRING_LENINT(bson);
+    struct deserialize_opts deserialize_opts;
+
+    deserialize_opts.compile_regex = 1;
+    if (rb_funcall(opts, rb_intern("has_key?"), 1, ID2SYM(rb_intern("compile_regex"))) == Qtrue &&
+        rb_hash_aref(opts, ID2SYM(rb_intern("compile_regex"))) == Qfalse) {
+        deserialize_opts.compile_regex = 0;
+    }
 
     // NOTE we just swallow the size and end byte here
     buffer += 4;
     remaining -= 5;
 
-    return elements_to_hash(buffer, remaining);
+    return elements_to_hash(buffer, remaining, &deserialize_opts);
 }
 
 static int legal_objectid_str(VALUE str) {
@@ -1084,6 +1154,14 @@ void Init_cbson() {
     MaxKey = rb_const_get(bson, rb_intern("MaxKey"));
     rb_require("bson/types/timestamp");
     Timestamp = rb_const_get(bson, rb_intern("Timestamp"));
+    rb_require("bson/types/regex");
+    BSONRegex = rb_const_get(bson, rb_intern("Regex"));
+    BSONRegex_IGNORECASE = FIX2INT(rb_const_get(BSONRegex, rb_intern("IGNORECASE")));
+    BSONRegex_EXTENDED = FIX2INT(rb_const_get(BSONRegex, rb_intern("EXTENDED")));
+    BSONRegex_MULTILINE = FIX2INT(rb_const_get(BSONRegex, rb_intern("MULTILINE")));
+    BSONRegex_DOTALL = FIX2INT(rb_const_get(BSONRegex, rb_intern("DOTALL")));
+    BSONRegex_LOCALE_DEPENDENT = FIX2INT(rb_const_get(BSONRegex, rb_intern("LOCALE_DEPENDENT")));
+    BSONRegex_UNICODE = FIX2INT(rb_const_get(BSONRegex, rb_intern("UNICODE")));
     Regexp = rb_const_get(rb_cObject, rb_intern("Regexp"));
     rb_require("bson/exceptions");
     InvalidKeyName = rb_const_get(bson, rb_intern("InvalidKeyName"));
@@ -1098,7 +1176,7 @@ void Init_cbson() {
     ext_version = rb_str_new2(VERSION);
     rb_define_const(CBson, "VERSION", ext_version);
     rb_define_module_function(CBson, "serialize", method_serialize, 4);
-    rb_define_module_function(CBson, "deserialize", method_deserialize, 1);
+    rb_define_module_function(CBson, "deserialize", method_deserialize, 2);
     rb_define_module_function(CBson, "max_bson_size", method_max_bson_size, 0);
     rb_define_module_function(CBson, "update_max_bson_size", method_update_max_bson_size, 1);
 

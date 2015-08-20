@@ -1,4 +1,4 @@
-# Copyright (C) 2013 10gen Inc.
+# Copyright (C) 2009-2013 MongoDB, Inc.
 #
 # Licensed under the Apache License, Version 2.0 (the "License");
 # you may not use this file except in compliance with the License.
@@ -58,6 +58,7 @@ module Mongo
           sock.checkin
         end
       end
+      true
     end
 
     # Sends a message to the database, waits for a response, and raises
@@ -66,8 +67,8 @@ module Mongo
     # @param [Integer] operation a MongoDB opcode.
     # @param [BSON::ByteBuffer] message a message to send to the database.
     # @param [String] db_name the name of the database. used on call to get_last_error.
-    # @param [Hash] last_error_params parameters to be sent to getLastError. See DB#error for
-    #   available options.
+    # @param [String] log_message this is currently a no-op and will be removed.
+    # @param [Hash] write_concern write concern.
     #
     # @see DB#get_last_error for valid last error params.
     #
@@ -85,22 +86,30 @@ module Mongo
         sock = checkout_writer
         send_message_on_socket(packed_message, sock)
         docs, num_received, cursor_id = receive(sock, last_error_id)
-        checkin(sock)
       rescue ConnectionFailure, OperationFailure, OperationTimeout => ex
-        checkin(sock)
         raise ex
       rescue SystemStackError, NoMemoryError, SystemCallError => ex
         close
+        sock = nil
         raise ex
+      ensure
+        checkin(sock) if sock
+        sock = nil
       end
 
-      if num_received == 1 && (error = docs[0]['err'] || docs[0]['errmsg'])
-        if error.include?("not master")
+      if num_received == 1
+        error = docs[0]['err'] || docs[0]['errmsg']
+        if error && error.include?("not master")
           close
           raise ConnectionFailure.new(docs[0]['code'].to_s + ': ' + error, docs[0]['code'], docs[0])
-        else
+        elsif (!error.nil? && note = docs[0]['jnote'] || docs[0]['wnote']) # assignment
+          code = docs[0]['code'] || Mongo::ErrorCode::BAD_VALUE # as of server version 2.5.5
+          raise WriteConcernError.new(code.to_s + ': ' + note, code, docs[0])
+        elsif error
+          code = docs[0]['code'] || Mongo::ErrorCode::UNKNOWN_ERROR
           error = "wtimeout" if error == "timeout"
-          raise OperationFailure.new(docs[0]['code'].to_s + ': ' + error, docs[0]['code'], docs[0])
+          raise WriteConcernError.new(code.to_s + ': ' + error, code, docs[0]) if error == "wtimeout"
+          raise OperationFailure.new(code.to_s + ': ' + error, code, docs[0])
         end
       end
 
@@ -115,22 +124,26 @@ module Mongo
     # @param [Socket] socket a socket to use in lieu of checking out a new one.
     # @param [Boolean] command (false) indicate whether this is a command. If this is a command,
     #   the message will be sent to the primary node.
-    # @param [Boolean] command (false) indicate whether the cursor should be exhausted. Set
+    # @param [Symbol] read the read preference.
+    # @param [Boolean] exhaust (false) indicate whether the cursor should be exhausted. Set
     #   this to true only when the OP_QUERY_EXHAUST flag is set.
+    # @param [Boolean] compile_regex whether BSON regex objects should be compiled into Ruby regexes.
     #
     # @return [Array]
     #   An array whose indexes include [0] documents returned, [1] number of document received,
     #   and [3] a cursor_id.
     def receive_message(operation, message, log_message=nil, socket=nil, command=false,
-                        read=:primary, exhaust=false)
-      request_id = add_message_headers(message, operation)
+                        read=:primary, exhaust=false, compile_regex=true)
+      request_id     = add_message_headers(message, operation)
       packed_message = message.to_s
+      opts = { :exhaust => exhaust,
+               :compile_regex => compile_regex }
 
       result = ''
 
       begin
         send_message_on_socket(packed_message, socket)
-        result = receive(socket, request_id, exhaust)
+        result = receive(socket, request_id, opts)
       rescue ConnectionFailure => ex
         socket.close
         checkin(socket)
@@ -149,7 +162,9 @@ module Mongo
 
     private
 
-    def receive(sock, cursor_id, exhaust=false)
+    def receive(sock, cursor_id, opts={})
+      exhaust    = !!opts.delete(:exhaust)
+
       if exhaust
         docs = []
         num_received = 0
@@ -157,7 +172,7 @@ module Mongo
         while(cursor_id != 0) do
           receive_header(sock, cursor_id, exhaust)
           number_received, cursor_id = receive_response_header(sock)
-          new_docs, n = read_documents(number_received, sock)
+          new_docs, n = read_documents(number_received, sock, opts)
           docs += new_docs
           num_received += n
         end
@@ -166,7 +181,7 @@ module Mongo
       else
         receive_header(sock, cursor_id, exhaust)
         number_received, cursor_id = receive_response_header(sock)
-        docs, num_received = read_documents(number_received, sock)
+        docs, num_received = read_documents(number_received, sock, opts)
 
         return [docs, num_received, cursor_id]
       end
@@ -212,7 +227,7 @@ module Mongo
       end
     end
 
-    def read_documents(number_received, sock)
+    def read_documents(number_received, sock, opts)
       docs = []
       number_remaining = number_received
       while number_remaining > 0 do
@@ -220,7 +235,7 @@ module Mongo
         size = buf.unpack('V')[0]
         buf << receive_message_on_socket(size - 4, sock)
         number_remaining -= 1
-        docs << BSON::BSON_CODER.deserialize(buf)
+        docs << BSON::BSON_CODER.deserialize(buf, opts)
       end
       [docs, number_received]
     end

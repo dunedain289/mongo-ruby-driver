@@ -1,4 +1,4 @@
-# Copyright (C) 2013 10gen Inc.
+# Copyright (C) 2009-2013 MongoDB, Inc.
 #
 # Licensed under the Apache License, Version 2.0 (the "License");
 # you may not use this file except in compliance with the License.
@@ -35,7 +35,7 @@ module BSON
     #
     # @param [Array, String] data to story as BSON binary. If a string is given, the on
     #   Ruby 1.9 it will be forced to the binary encoding.
-    # @param [Fixnum] one of four values specifying a BSON binary subtype. Possible values are
+    # @param [Fixnum] subtype one of four values specifying a BSON binary subtype. Possible values are
     #   SUBTYPE_BYTES, SUBTYPE_UUID, SUBTYPE_MD5, and SUBTYPE_USER_DEFINED.
     #
     # @see http://www.mongodb.org/display/DOCS/BSON#BSON-noteondatabinary BSON binary subtypes.

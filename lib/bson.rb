@@ -1,4 +1,4 @@
-# Copyright (C) 2013 10gen Inc.
+# Copyright (C) 2009-2013 MongoDB, Inc.
 #
 # Licensed under the Apache License, Version 2.0 (the "License");
 # you may not use this file except in compliance with the License.
@@ -19,8 +19,8 @@ module BSON
     BSON_CODER.serialize(obj, check_keys, move_id)
   end
 
-  def self.deserialize(buf=nil)
-    BSON_CODER.deserialize(buf)
+  def self.deserialize(buf=nil, opts={})
+    BSON_CODER.deserialize(buf, opts)
   end
 
   # Reads a single BSON document from an IO object.
@@ -108,5 +108,6 @@ require 'bson/types/binary'
 require 'bson/types/code'
 require 'bson/types/dbref'
 require 'bson/types/min_max_keys'
+require 'bson/types/regex'
 require 'bson/types/object_id'
 require 'bson/types/timestamp'

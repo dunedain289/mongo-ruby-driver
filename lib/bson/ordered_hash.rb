@@ -1,4 +1,4 @@
-# Copyright (C) 2013 10gen Inc.
+# Copyright (C) 2009-2013 MongoDB, Inc.
 #
 # Licensed under the Apache License, Version 2.0 (the "License");
 # you may not use this file except in compliance with the License.
@@ -39,6 +39,16 @@ module BSON
     # @return [true, false] true if options can be extracted
     def extractable_options?
       instance_of?(BSON::OrderedHash)
+    end
+
+    def reject
+      return to_enum(:reject) unless block_given?
+      dup.tap {|hash| hash.reject!{|k, v| yield k, v}}
+    end
+
+    def select
+      return to_enum(:select) unless block_given?
+      dup.tap {|hash| hash.reject!{|k, v| ! yield k, v}}
     end
 
     # We only need the body of this class if the RUBY_VERSION is before 1.9
@@ -142,21 +152,16 @@ module BSON
         self
       end
 
-      def reject(&block)
-        clone = self.clone
-        return clone unless block_given?
-        clone.delete_if(&block)
-      end
-
-      def reject!(&block)
-        changed = false
-        self.each do |k,v|
-          if yield k, v
-            changed = true
-            delete(k)
+      def reject!
+        return to_enum(:reject!) unless block_given?
+        raise "can't modify frozen BSON::OrderedHash" if frozen?
+        keys = @ordered_keys.dup
+        @ordered_keys.each do |k|
+          if yield k, self[k]
+            keys.delete(k)
           end
         end
-        changed ? self : nil
+        keys == @ordered_keys ? nil : @ordered_keys = keys
       end
 
       def clear

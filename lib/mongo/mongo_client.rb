@@ -1,4 +1,4 @@
-# Copyright (C) 2013 10gen Inc.
+# Copyright (C) 2009-2013 MongoDB, Inc.
 #
 # Licensed under the Apache License, Version 2.0 (the "License");
 # you may not use this file except in compliance with the License.
@@ -12,10 +12,6 @@
 # See the License for the specific language governing permissions and
 # limitations under the License.
 
-require 'set'
-require 'socket'
-require 'thread'
-
 module Mongo
 
   # Instantiates and manages self.connections to MongoDB.
@@ -23,6 +19,22 @@ module Mongo
     include Mongo::Logging
     include Mongo::Networking
     include Mongo::WriteConcern
+    include Mongo::Authentication
+
+    # Wire version
+    RELEASE_2_4_AND_BEFORE = 0 # Everything before we started tracking.
+    AGG_RETURNS_CURSORS    = 1 # The aggregation command may now be requested to return cursors.
+    BATCH_COMMANDS         = 2 # insert, update, and delete batch command
+    MONGODB_3_0            = 3 # listCollections and listIndexes commands, SCRAM-SHA-1 auth mechanism
+    MAX_WIRE_VERSION       = MONGODB_3_0 # supported by this client implementation
+    MIN_WIRE_VERSION       = RELEASE_2_4_AND_BEFORE # supported by this client implementation
+
+    # Server command headroom
+    COMMAND_HEADROOM   = 16_384
+    APPEND_HEADROOM    = COMMAND_HEADROOM / 2
+    SERIALIZE_HEADROOM = APPEND_HEADROOM / 2
+
+    DEFAULT_MAX_WRITE_BATCH_SIZE = 1000
 
     Mutex              = ::Mutex
     ConditionVariable  = ::ConditionVariable
@@ -30,9 +42,10 @@ module Mongo
     DEFAULT_HOST         = 'localhost'
     DEFAULT_PORT         = 27017
     DEFAULT_DB_NAME      = 'test'
-    GENERIC_OPTS         = [:auths, :logger, :connect, :default_db]
+    DEFAULT_OP_TIMEOUT   = 20
+    GENERIC_OPTS         = [:auths, :logger, :connect, :db_name]
     TIMEOUT_OPTS         = [:timeout, :op_timeout, :connect_timeout]
-    SSL_OPTS             = [:ssl, :ssl_key, :ssl_cert, :ssl_verify, :ssl_ca_cert]
+    SSL_OPTS             = [:ssl, :ssl_key, :ssl_cert, :ssl_verify, :ssl_ca_cert, :ssl_key_pass_phrase]
     POOL_OPTS            = [:pool_size, :pool_timeout]
     READ_PREFERENCE_OPTS = [:read, :tag_sets, :secondary_acceptable_latency_ms]
     WRITE_CONCERN_OPTS   = [:w, :j, :fsync, :wtimeout]
@@ -55,7 +68,10 @@ module Mongo
                 :op_timeout,
                 :tag_sets,
                 :acceptable_latency,
-                :read
+                :read,
+                :max_wire_version,
+                :min_wire_version,
+                :max_write_batch_size
 
     # Create a connection to single MongoDB instance.
     #
@@ -77,10 +93,16 @@ module Mongo
     #  @param [Hash] opts hash of optional settings and configuration values.
     #
     #  @option opts [String, Integer, Symbol] :w (1) Set default number of nodes to which a write
-    #    should be acknowledged
-    #  @option opts [Boolean] :j (false) Set journal acknowledgement
-    #  @option opts [Integer] :wtimeout (nil) Set replica set acknowledgement timeout
-    #  @option opts [Boolean] :fsync (false) Set fsync acknowledgement.
+    #   should be acknowledged.
+    #  @option opts [Integer] :wtimeout (nil) Set replica set acknowledgement timeout.
+    #  @option opts [Boolean] :j (false) If true, block until write operations have been committed
+    #   to the journal. Cannot be used in combination with 'fsync'. Prior to MongoDB 2.6 this option was
+    #   ignored if the server was running without journaling. Starting with MongoDB 2.6, write operations will
+    #   fail with an exception if this option is used when the server is running without journaling.
+    #  @option opts [Boolean] :fsync (false) If true, and the server is running without journaling, blocks until
+    #   the server has synced all data files to disk. If the server is running with journaling, this acts the same as
+    #   the 'j' option, blocking until write operations have been committed to the journal.
+    #   Cannot be used in combination with 'j'.
     #
     #  Notes about Write-Concern Options:
     #   Write concern options are propagated to objects instantiated from this MongoClient.
@@ -90,7 +112,8 @@ module Mongo
     #  @option opts [Boolean] :ssl (false) If true, create the connection to the server using SSL.
     #  @option opts [String] :ssl_cert (nil) The certificate file used to identify the local connection against MongoDB.
     #  @option opts [String] :ssl_key (nil) The private keyfile used to identify the local connection against MongoDB.
-    #    If included with the :ssl_cert then only :ssl_cert is needed.
+    #    Note that even if the key is stored in the same file as the certificate, both need to be explicitly specified.
+    #  @option opts [String] :ssl_key_pass_phrase (nil) A passphrase for the private key.
     #  @option opts [Boolean] :ssl_verify (nil) Specifies whether or not peer certification validation should occur.
     #  @option opts [String] :ssl_ca_cert (nil) The ca_certs file contains a set of concatenated "certification authority"
     #    certificates, which are used to validate certificates passed from the other end of the connection.
@@ -104,8 +127,8 @@ module Mongo
     #  @option opts [Float] :pool_timeout (5.0) When all of the self.connections a pool are checked out,
     #    this is the number of seconds to wait for a new connection to be released before throwing an exception.
     #    Note: this setting is relevant only for multi-threaded applications.
-    #  @option opts [Float] :op_timeout (nil) The number of seconds to wait for a read operation to time out.
-    #    Disabled by default.
+    #  @option opts [Float] :op_timeout (DEFAULT_OP_TIMEOUT) The number of seconds to wait for a read operation to time out.
+    #    Set to DEFAULT_OP_TIMEOUT (20) by default. A value of nil may be specified explicitly.
     #  @option opts [Float] :connect_timeout (nil) The number of seconds to wait before timing out a
     #    connection attempt.
     #
@@ -130,10 +153,8 @@ module Mongo
     #   driver fails to connect to a replica set with that name.
     #
     # @raise [MongoArgumentError] If called with no arguments and <code>ENV["MONGODB_URI"]</code> implies a replica set.
-    #
-    # @core self.connections
     def initialize(*args)
-      opts = args.last.is_a?(Hash) ? args.pop : {}
+      opts         = args.last.is_a?(Hash) ? args.pop : {}
       @host, @port = parse_init(args[0], args[1], opts)
 
       # Lock for request ids.
@@ -145,11 +166,14 @@ module Mongo
       @mongos       = false
 
       # Not set for direct connection
-      @tag_sets = []
+      @tag_sets           = []
       @acceptable_latency = 15
 
+      @max_bson_size    = nil
       @max_message_size = nil
-      @max_bson_size = nil
+      @max_wire_version = nil
+      @min_wire_version = nil
+      @max_write_batch_size = nil
 
       check_opts(opts)
       setup(opts.dup)
@@ -182,8 +206,7 @@ module Mongo
     #
     # @deprecated
     def self.multi(nodes, opts={})
-      warn "MongoClient.multi is now deprecated and will be removed in v2.0. Please use MongoReplicaSetClient.new instead."
-
+      warn 'MongoClient.multi is now deprecated and will be removed in v2.0. Please use MongoReplicaSetClient.new instead.'
       MongoReplicaSetClient.new(nodes, opts)
     end
 
@@ -195,26 +218,12 @@ module Mongo
     # @param uri [String]
     #   A string of the format mongodb://[username:password@]host1[:port1][,host2[:port2],...[,hostN[:portN]]][/database]
     #
-    # @param opts Any of the options available for MongoClient.new
+    # @param [Hash] extra_opts Any of the options available for MongoClient.new
     #
     # @return [Mongo::MongoClient, Mongo::MongoReplicaSetClient]
     def self.from_uri(uri = ENV['MONGODB_URI'], extra_opts={})
       parser = URIParser.new(uri)
       parser.connection(extra_opts)
-    end
-
-    def parse_init(host, port, opts)
-      if host.nil? && port.nil? && ENV.has_key?('MONGODB_URI')
-        parser = URIParser.new(ENV['MONGODB_URI'])
-        if parser.replicaset?
-          raise MongoArgumentError,
-            "ENV['MONGODB_URI'] implies a replica set."
-        end
-        opts.merge!(parser.connection_options)
-        [parser.host, parser.port]
-      else
-        [host || DEFAULT_HOST, port || DEFAULT_PORT]
-      end
     end
 
     # The host name used for this connection.
@@ -235,8 +244,7 @@ module Mongo
       [@host, @port]
     end
 
-    # Fsync, then lock the mongod process against writes. Use this to get
-    # the datafiles in a state safe for snapshotting, backing up, etc.
+    # Flush all pending writes to datafiles.
     #
     # @return [BSON::OrderedHash] the command response
     def lock!
@@ -258,76 +266,6 @@ module Mongo
     # @return [BSON::OrderedHash] command response
     def unlock!
       self['admin']['$cmd.sys.unlock'].find_one
-    end
-
-    # Apply each of the saved database authentications.
-    #
-    # @return [Boolean] returns true if authentications exist and succeeds, false
-    #   if none exists.
-    #
-    # @raise [AuthenticationError] raises an exception if any one
-    #   authentication fails.
-    def apply_saved_authentication(opts={})
-      return false if @auths.empty?
-      @auths.each do |auth|
-        self[auth[:db_name]].issue_authentication(auth[:username], auth[:password], false,
-          :source => auth[:source], :socket => opts[:socket])
-      end
-      true
-    end
-
-    # Save an authentication to this connection. When connecting,
-    # the connection will attempt to re-authenticate on every db
-    # specified in the list of auths. This method is called automatically
-    # by DB#authenticate.
-    #
-    # Note: this method will not actually issue an authentication command. To do that,
-    # either run MongoClient#apply_saved_authentication or DB#authenticate.
-    #
-    # @param [String] db_name
-    # @param [String] username
-    # @param [String] password
-    #
-    # @return [Hash] a hash representing the authentication just added.
-    def add_auth(db_name, username, password, source)
-      if @auths.any? {|a| a[:db_name] == db_name}
-        raise MongoArgumentError, "Cannot apply multiple authentications to database '#{db_name}'"
-      end
-
-      auth = {
-        :db_name  => db_name,
-        :username => username,
-        :password => password,
-        :source => source
-      }
-      @auths << auth
-      auth
-    end
-
-    # Remove a saved authentication for this connection.
-    #
-    # @param [String] db_name
-    #
-    # @return [Boolean]
-    def remove_auth(db_name)
-      return unless @auths
-      @auths.reject! { |a| a[:db_name] == db_name } ? true : false
-    end
-
-    # Remove all authentication information stored in this connection.
-    #
-    # @return [true] this operation return true because it always succeeds.
-    def clear_auths
-      @auths = []
-      true
-    end
-
-    def authenticate_pools
-      @primary_pool.authenticate_existing
-    end
-
-    def logout_pools(db)
-      @primary_pool.logout_existing(db)
     end
 
     # Return a hash with all database names
@@ -352,74 +290,63 @@ module Mongo
     # Return a database with the given name.
     # See DB#new for valid options hash parameters.
     #
-    # @param [String] db_name a valid database name.
-    # @param [Hash] opts options to be passed to the DB constructor.
+    # @param name [String] The name of the database.
+    # @param opts [Hash] A hash of options to be passed to the DB constructor.
     #
-    # @return [Mongo::DB]
-    #
-    # @core databases db-instance_method
-    def db(db_name = @default_db, opts = {})
-      DB.new(db_name, self, opts)
+    # @return [DB] The DB instance.
+    def db(name = nil, opts = {})
+      DB.new(name || @db_name || DEFAULT_DB_NAME, self, opts)
     end
 
-    # Shortcut for returning a database. Use DB#db to accept options.
+    # Shortcut for returning a database. Use MongoClient#db to accept options.
     #
-    # @param [String] db_name a valid database name.
+    # @param name [String] The name of the database.
     #
-    # @return [Mongo::DB]
-    #
-    # @core databases []-instance_method
-    def [](db_name)
-      DB.new(db_name, self)
+    # @return [DB] The DB instance.
+    def [](name)
+      DB.new(name, self)
     end
 
-    def refresh
-    end
+    def refresh; end
 
     def pinned_pool
       @primary_pool
     end
 
-    def pin_pool(pool, read_prefs)
-    end
+    def pin_pool(pool, read_prefs); end
 
-    def unpin_pool
-    end
+    def unpin_pool; end
 
     # Drop a database.
     #
-    # @param [String] name name of an existing database.
-    def drop_database(name)
-      self[name].command(:dropDatabase => 1)
+    # @param database [String] name of an existing database.
+    def drop_database(database)
+      self[database].command(:dropDatabase => 1)
     end
 
     # Copy the database +from+ to +to+ on localhost. The +from+ database is
     # assumed to be on localhost, but an alternate host can be specified.
     #
-    # @param [String] from name of the database to copy from.
-    # @param [String] to name of the database to copy to.
-    # @param [String] from_host host of the 'from' database.
-    # @param [String] username username for authentication against from_db (>=1.3.x).
-    # @param [String] password password for authentication against from_db (>=1.3.x).
-    def copy_database(from, to, from_host=DEFAULT_HOST, username=nil, password=nil)
-      oh = BSON::OrderedHash.new
-      oh[:copydb]   = 1
-      oh[:fromhost] = from_host
-      oh[:fromdb]   = from
-      oh[:todb]     = to
-      if username || password
-        unless username && password
-          raise MongoArgumentError, "Both username and password must be supplied for authentication."
-        end
-        nonce_cmd = BSON::OrderedHash.new
-        nonce_cmd[:copydbgetnonce] = 1
-        nonce_cmd[:fromhost] = from_host
-        result = self["admin"].command(nonce_cmd)
-        oh[:nonce] = result["nonce"]
-        oh[:username] = username
-        oh[:key] = Mongo::Support.auth_key(username, password, oh[:nonce])
+    # @param from [String] name of the database to copy from.
+    # @param to [String] name of the database to copy to.
+    # @param from_host [String] host of the 'from' database.
+    # @param username [String] username (applies to 'from' db)
+    # @param password [String] password (applies to 'from' db)
+    #
+    # @note This command only supports the MONGODB-CR authentication mechanism.
+    def copy_database(
+      from,
+      to,
+      from_host = DEFAULT_HOST,
+      username = nil,
+      password = nil,
+      mechanism = 'SCRAM-SHA-1'
+    )
+      if wire_version_feature?(MONGODB_3_0) && mechanism == 'SCRAM-SHA-1'
+        copy_db_scram(username, password, from_host, from, to)
+      else
+        copy_db_mongodb_cr(username, password, from_host, from, to)
       end
-      self["admin"].command(oh)
     end
 
     # Checks if a server is alive. This command will return immediately
@@ -427,14 +354,14 @@ module Mongo
     #
     # @return [Hash]
     def ping
-      self["admin"].command({:ping => 1})
+      self['admin'].command({:ping => 1})
     end
 
     # Get the build information for the current connection.
     #
     # @return [Hash]
     def server_info
-      self["admin"].command({:buildinfo => 1})
+      self['admin'].command({:buildinfo => 1})
     end
 
     # Get the build version of the current server.
@@ -442,7 +369,7 @@ module Mongo
     # @return [Mongo::ServerVersion]
     #   object allowing easy comparability of version.
     def server_version
-      ServerVersion.new(server_info["version"])
+      ServerVersion.new(server_info['version'])
     end
 
     # Is it okay to connect to a slave?
@@ -477,14 +404,20 @@ module Mongo
           @mongos = true
         end
 
-        @max_bson_size = config['maxBsonObjectSize']
+        @max_bson_size    = config['maxBsonObjectSize']
         @max_message_size = config['maxMessageSizeBytes']
+        @max_wire_version = config['maxWireVersion']
+        @min_wire_version = config['minWireVersion']
+        @max_write_batch_size = config['maxWriteBatchSize']
+        check_wire_version_in_range
         set_primary(host_port)
       end
 
-      if !connected?
-        raise ConnectionFailure, "Failed to connect to a master node at #{host_port.join(":")}"
+      unless connected?
+        raise ConnectionFailure,
+          "Failed to connect to a master node at #{host_port.join(":")}"
       end
+
       true
     end
     alias :reconnect :connect
@@ -508,7 +441,7 @@ module Mongo
       ping
       true
 
-      rescue ConnectionFailure
+      rescue ConnectionFailure, OperationTimeout
       false
     end
 
@@ -532,7 +465,7 @@ module Mongo
     def close
       @primary_pool.close if @primary_pool
       @primary_pool = nil
-      @primary = nil
+      @primary      = nil
     end
 
     # Returns the maximum BSON object size as returned by the core server.
@@ -545,6 +478,30 @@ module Mongo
 
     def max_message_size
       @max_message_size || max_bson_size * MESSAGE_SIZE_FACTOR
+    end
+
+    def max_wire_version
+      @max_wire_version || 0
+    end
+
+    def min_wire_version
+      @min_wire_version || 0
+    end
+
+    def max_write_batch_size
+      @max_write_batch_size || DEFAULT_MAX_WRITE_BATCH_SIZE
+    end
+
+    def wire_version_feature?(feature)
+      min_wire_version <= feature && feature <= max_wire_version
+    end
+
+    def primary_wire_version_feature?(feature)
+      min_wire_version <= feature && feature <= max_wire_version
+    end
+
+    def use_write_command?(write_concern)
+      write_concern[:w] != 0 && primary_wire_version_feature?(Mongo::MongoClient::BATCH_COMMANDS)
     end
 
     # Checkout a socket for reading (i.e., a secondary node).
@@ -582,10 +539,10 @@ module Mongo
         socket = @socket_class.new(host, port, @op_timeout, @connect_timeout, @socket_opts)
         if @connect_timeout
           Timeout::timeout(@connect_timeout, OperationTimeout) do
-            config = self['admin'].command({:ismaster => 1}, :socket => socket)
+            config = self['admin'].command({:isMaster => 1}, :socket => socket)
           end
         else
-          config = self['admin'].command({:ismaster => 1}, :socket => socket)
+          config = self['admin'].command({:isMaster => 1}, :socket => socket)
         end
       rescue OperationFailure, SocketError, SystemCallError, IOError
         close
@@ -632,16 +589,24 @@ module Mongo
       @socket_opts = {}
       if @ssl
         # construct ssl socket opts
-        @socket_opts[:key]     = opts.delete(:ssl_key)
-        @socket_opts[:cert]    = opts.delete(:ssl_cert)
-        @socket_opts[:verify]  = opts.delete(:ssl_verify)
-        @socket_opts[:ca_cert] = opts.delete(:ssl_ca_cert)
+        @socket_opts[:key]             = opts.delete(:ssl_key)
+        @socket_opts[:cert]            = opts.delete(:ssl_cert)
+        @socket_opts[:verify]          = opts.delete(:ssl_verify)
+        @socket_opts[:ca_cert]         = opts.delete(:ssl_ca_cert)
+        @socket_opts[:key_pass_phrase] = opts.delete(:ssl_key_pass_phrase)
 
         # verify peer requires ca_cert, raise if only one is present
         if @socket_opts[:verify] && !@socket_opts[:ca_cert]
           raise MongoArgumentError,
-            "If :ssl_verify_mode has been specified, then you must include " +
-            ":ssl_ca_cert in order to perform server validation."
+            'If :ssl_verify_mode has been specified, then you must include ' +
+            ':ssl_ca_cert in order to perform server validation.'
+        end
+
+        # if we have a keyfile passphrase but no key file, raise
+        if @socket_opts[:key_pass_phrase] && !@socket_opts[:key]
+          raise MongoArgumentError,
+            'If :ssl_key_pass_phrase has been specified, then you must include ' +
+            ':ssl_key, the passphrase-protected keyfile.'
         end
 
         @socket_class = Mongo::SSLSocket
@@ -651,26 +616,25 @@ module Mongo
         @socket_class = Mongo::TCPSocket
       end
 
-      # Authentication objects
-      @auths = opts.delete(:auths) || []
+      @db_name = opts.delete(:db_name)
+      @auths   = opts.delete(:auths) || Set.new
 
       # Pool size and timeout.
       @pool_size = opts.delete(:pool_size) || 1
       if opts[:timeout]
-        warn "The :timeout option has been deprecated " +
-             "and will be removed in the 2.0 release. " +
-             "Use :pool_timeout instead."
+        warn 'The :timeout option has been deprecated ' +
+             'and will be removed in the 2.0 release. ' +
+             'Use :pool_timeout instead.'
       end
       @pool_timeout = opts.delete(:pool_timeout) || opts.delete(:timeout) || 5.0
 
       # Timeout on socket read operation.
-      @op_timeout = opts.delete(:op_timeout) || nil
+      @op_timeout = opts.key?(:op_timeout) ? opts.delete(:op_timeout) : DEFAULT_OP_TIMEOUT
 
       # Timeout on socket connect.
       @connect_timeout = opts.delete(:connect_timeout) || 30
 
-      @logger = opts.delete(:logger) || nil
-
+      @logger = opts.delete(:logger)
       if @logger
         write_logging_startup_message
       end
@@ -683,7 +647,6 @@ module Mongo
       end
       Mongo::ReadPreference::validate(@read)
 
-      @default_db = opts.delete(:default_db) || DEFAULT_DB_NAME
       @tag_sets = opts.delete(:tag_sets) || []
       @acceptable_latency = opts.delete(:secondary_acceptable_latency_ms) || 15
 
@@ -695,11 +658,40 @@ module Mongo
 
     private
 
-    # Set the specified node as primary.
+    # Parses client initialization info from MONGODB_URI env variable
+    def parse_init(host, port, opts)
+      if host.nil? && port.nil? && ENV.has_key?('MONGODB_URI')
+        parser = URIParser.new(ENV['MONGODB_URI'])
+        if parser.replicaset?
+          raise MongoArgumentError,
+            'ENV[\'MONGODB_URI\'] implies a replica set.'
+        end
+        opts.merge!(parser.connection_options)
+        [parser.host, parser.port]
+      else
+        host = host[1...-1] if host && host[0,1] == '[' # ipv6 support
+        [host || DEFAULT_HOST, port || DEFAULT_PORT]
+      end
+    end
+
+    # Set the specified node as primary
     def set_primary(node)
-      host, port = *node
-      @primary = [host, port]
+      host, port    = *node
+      @primary      = [host, port]
       @primary_pool = Pool.new(self, host, port, :size => @pool_size, :timeout => @pool_timeout)
+    end
+
+    # calculate wire version in range
+    def check_wire_version_in_range
+      unless MIN_WIRE_VERSION <= max_wire_version &&
+             MAX_WIRE_VERSION >= min_wire_version
+        close
+        raise ConnectionFailure,
+            "Client wire-version range #{MIN_WIRE_VERSION} to " +
+            "#{MAX_WIRE_VERSION} does not support server range " +
+            "#{min_wire_version} to #{max_wire_version}, please update " +
+            "clients or servers"
+      end
     end
   end
 end

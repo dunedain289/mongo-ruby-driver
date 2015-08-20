@@ -1,4 +1,4 @@
-# Copyright (C) 2013 10gen Inc.
+# Copyright (C) 2009-2013 MongoDB, Inc.
 #
 # Licensed under the Apache License, Version 2.0 (the "License");
 # you may not use this file except in compliance with the License.
@@ -17,8 +17,8 @@ require 'test_helper'
 class ReplicaSetPinningTest < Test::Unit::TestCase
   def setup
     ensure_cluster(:rs)
-    @client = MongoReplicaSetClient.new(@rs.repl_set_seeds, :name => @rs.repl_set_name)
-    @db = @client.db(MONGO_TEST_DB)
+    @client = MongoReplicaSetClient.from_uri(@uri, :op_timeout => TEST_OP_TIMEOUT)
+    @db = @client.db(TEST_DB)
     @coll = @db.collection("test-sets")
     @coll.insert({:a => 1})
   end
@@ -51,5 +51,55 @@ class ReplicaSetPinningTest < Test::Unit::TestCase
       end
     end
     threads.each(&:join)
+  end
+
+  def test_aggregation_cursor_pinning
+    return unless @client.server_version >= '2.5.1'
+    @coll.drop
+
+    [10, 1000].each do |size|
+      @coll.drop
+      size.times {|i| @coll.insert({ :_id => i }) }
+      expected_sum = size.times.reduce(:+)
+
+      cursor = @coll.aggregate(
+          [{ :$project => {:_id => '$_id'}} ],
+          :cursor => { :batchSize => 1 }
+      )
+
+      assert_equal Mongo::Cursor, cursor.class
+
+      cursor_sum = cursor.reduce(0) do |sum, doc|
+        sum += doc['_id']
+      end
+
+      assert_equal expected_sum, cursor_sum
+    end
+    @coll.drop
+  end
+
+  def test_parallel_scan_pinning
+    return unless @client.server_version >= '2.5.5'
+    @coll.drop
+
+    8000.times { |i| @coll.insert({ :_id => i }) }
+
+    lock = Mutex.new
+    doc_ids = Set.new
+    threads = []
+    cursors = @coll.parallel_scan(3)
+    cursors.each_with_index do |cursor, i|
+      threads << Thread.new do
+        docs = cursor.to_a
+        lock.synchronize do
+          docs.each do |doc|
+            doc_ids << doc['_id']
+          end
+        end
+      end
+    end
+    threads.each(&:join)
+    assert_equal 8000, doc_ids.count
+    @coll.drop
   end
 end

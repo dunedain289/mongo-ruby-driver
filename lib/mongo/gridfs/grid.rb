@@ -1,4 +1,4 @@
-# Copyright (C) 2013 10gen Inc.
+# Copyright (C) 2009-2013 MongoDB, Inc.
 #
 # Licensed under the Apache License, Version 2.0 (the "License");
 # you may not use this file except in compliance with the License.
@@ -22,8 +22,6 @@ module Mongo
 
     # Initialize a new Grid instance, consisting of a MongoDB database
     # and a filesystem prefix if not using the default.
-    #
-    # @core gridfs
     #
     # @see GridFileSystem
     def initialize(db, fs_name=DEFAULT_FS_NAME)
@@ -56,7 +54,7 @@ module Mongo
     # @option opts [String] :content_type ('binary/octet-stream') If no content type is specified,
     #   the content type will may be inferred from the filename extension if the mime-types gem can be
     #   loaded. Otherwise, the content type 'binary/octet-stream' will be used.
-    # @option opts [Integer] (262144) :chunk_size size of file chunks in bytes.
+    # @option opts [Integer] (261120) :chunk_size size of file chunks in bytes.
     # @option opts [String, Integer, Symbol] :w (1) Set write concern
     #
     #   Notes on write concern:
@@ -83,7 +81,7 @@ module Mongo
 
     # Read a file from the file store.
     #
-    # @param [] id the file's unique id.
+    # @param id the file's unique id.
     #
     # @return [Mongo::GridIO]
     def get(id)
@@ -97,7 +95,7 @@ module Mongo
     # is attempting to read a file while it's being deleted. While the odds for this
     # kind of race condition are small, it's important to be aware of.
     #
-    # @param [] id
+    # @param id
     #
     # @return [Boolean]
     def delete(id)

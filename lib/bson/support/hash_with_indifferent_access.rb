@@ -1,4 +1,4 @@
-# Copyright (C) 2013 10gen Inc.
+# Copyright (C) 2009-2013 MongoDB, Inc.
 #
 # Licensed under the Apache License, Version 2.0 (the "License");
 # you may not use this file except in compliance with the License.
@@ -49,6 +49,16 @@ module ActiveSupport
       end
     end
 
+    def reject
+      return to_enum(:reject) unless block_given?
+      dup.tap {|hash| hash.reject!{|k, v| yield k, v}}
+    end
+
+    def select
+      return to_enum(:select) unless block_given?
+      dup.tap {|hash| hash.reject!{|k, v| ! yield k, v}}
+    end
+    
     alias_method :regular_writer, :[]= unless method_defined?(:regular_writer)
     alias_method :regular_update, :update unless method_defined?(:regular_update)
 

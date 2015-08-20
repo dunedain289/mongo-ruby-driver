@@ -1,4 +1,4 @@
-# Copyright (C) 2013 10gen Inc.
+# Copyright (C) 2009-2013 MongoDB, Inc.
 #
 # Licensed under the Apache License, Version 2.0 (the "License");
 # you may not use this file except in compliance with the License.
@@ -17,9 +17,7 @@ require 'test_helper'
 class DBConnectionTest < Test::Unit::TestCase
 
   def test_no_exceptions
-    host = ENV['MONGO_RUBY_DRIVER_HOST'] || 'localhost'
-    port = ENV['MONGO_RUBY_DRIVER_PORT'] || MongoClient::DEFAULT_PORT
-    db = MongoClient.new(host, port).db(MONGO_TEST_DB)
+    db = standard_connection.db(TEST_DB)
     coll = db.collection('test')
     coll.remove
     db.get_last_error

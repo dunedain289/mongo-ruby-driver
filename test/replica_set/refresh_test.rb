@@ -1,4 +1,4 @@
-# Copyright (C) 2013 10gen Inc.
+# Copyright (C) 2009-2013 MongoDB, Inc.
 #
 # Licensed under the Apache License, Version 2.0 (the "License");
 # you may not use this file except in compliance with the License.
@@ -22,7 +22,9 @@ class ReplicaSetRefreshTest < Test::Unit::TestCase
 
   def test_connect_and_manual_refresh_with_secondary_down
     num_secondaries = @rs.secondaries.size
-    client = MongoReplicaSetClient.new(@rs.repl_set_seeds, :refresh_mode => false)
+    client = MongoReplicaSetClient.new(@rs.repl_set_seeds, :refresh_mode => false,
+                                       :op_timeout => TEST_OP_TIMEOUT)
+    authenticate_client(client)
 
     assert_equal num_secondaries, client.secondaries.size
     assert client.connected?
@@ -56,7 +58,9 @@ class ReplicaSetRefreshTest < Test::Unit::TestCase
   def test_automated_refresh_with_secondary_down
     num_secondaries = @rs.secondaries.size
     client = MongoReplicaSetClient.new(@rs.repl_set_seeds,
-      :refresh_interval => 1, :refresh_mode => :sync, :read => :secondary_preferred)
+      :refresh_interval => 1, :refresh_mode => :sync, :read => :secondary_preferred,
+      :op_timeout => TEST_OP_TIMEOUT)
+    authenticate_client(client)
 
     # Ensure secondaries are all recognized by client and client is connected
     assert_equal num_secondaries, client.secondaries.size
@@ -69,7 +73,7 @@ class ReplicaSetRefreshTest < Test::Unit::TestCase
 
     old_refresh_version = client.refresh_version
     # Trigger synchronous refresh
-    client['foo']['bar'].find_one
+    client[TEST_DB]['rs-refresh-test'].find_one
 
     assert client.connected?
     assert client.refresh_version > old_refresh_version
@@ -83,7 +87,7 @@ class ReplicaSetRefreshTest < Test::Unit::TestCase
 
     old_refresh_version = client.refresh_version
     # Trigger synchronous refresh
-    client['foo']['bar'].find_one
+    client[TEST_DB]['rs-refresh-test'].find_one
 
     assert client.connected?
     assert client.refresh_version > old_refresh_version,
@@ -97,13 +101,15 @@ class ReplicaSetRefreshTest < Test::Unit::TestCase
     factor = 5
     nthreads = factor * 10
     threads = []
-    client = MongoReplicaSetClient.new(@rs.repl_set_seeds, :refresh_mode => :sync, :refresh_interval => 1)
+    client = MongoReplicaSetClient.new(@rs.repl_set_seeds, :refresh_mode => :sync,
+                                       :refresh_interval => 1, :op_timeout => TEST_OP_TIMEOUT)
+    authenticate_client(client)
 
     nthreads.times do |i|
       threads << Thread.new do
         # force a connection failure every couple of threads that causes a refresh
         if i % factor == 0
-          cursor = client['foo']['bar'].find
+          cursor = client[TEST_DB]['rs-refresh-test'].find
           cursor.stubs(:checkout_socket_from_connection).raises(ConnectionFailure)
           begin
             cursor.next
@@ -113,7 +119,7 @@ class ReplicaSetRefreshTest < Test::Unit::TestCase
           end
         else
           # synchronous refreshes will happen every couple of find_ones
-          cursor = client['foo']['bar'].find_one
+          cursor = client[TEST_DB]['rs-refresh-test'].find_one
         end
       end
     end
@@ -123,10 +129,28 @@ class ReplicaSetRefreshTest < Test::Unit::TestCase
     end
   end
 
+  def test_manager_recursive_locking
+  # See RUBY-775
+  # This tests that there isn't recursive locking when a pool manager reconnects
+  # to all replica set members. The bug in RUBY-775 occurred because the same lock
+  # acquired in order to connect the pool manager was used to read the pool manager's
+  # state.
+    client = MongoReplicaSetClient.from_uri(@uri)
+
+    cursor = client[TEST_DB]['rs-refresh-test'].find
+    client.stubs(:receive_message).raises(ConnectionFailure)
+    client.manager.stubs(:refresh_required?).returns(true)
+    client.manager.stubs(:check_connection_health).returns(true)
+    assert_raise ConnectionFailure do
+       cursor.next
+    end
+  end
+
 =begin
   def test_automated_refresh_with_removed_node
     client = MongoReplicaSetClient.new(@rs.repl_set_seeds,
       :refresh_interval => 1, :refresh_mode => :sync)
+    authenticate_client(client)
 
     num_secondaries = client.secondary_pools.length
     old_refresh_version = client.refresh_version
@@ -135,7 +159,7 @@ class ReplicaSetRefreshTest < Test::Unit::TestCase
     sleep(2)
 
     rescue_connection_failure do
-      client['foo']['bar'].find_one
+      client[TEST_DB]['rs-refresh-test'].find_one
     end
 
     assert client.refresh_version > old_refresh_version,
@@ -152,7 +176,7 @@ class ReplicaSetRefreshTest < Test::Unit::TestCase
 
     @rs.add_node
     sleep(4)
-    client['foo']['bar'].find_one
+    client[TEST_DB]['rs-refresh-test'].find_one
 
     @conn2 = MongoReplicaSetClient.new(build_seeds(3),
       :refresh_interval => 2, :refresh_mode => :sync)

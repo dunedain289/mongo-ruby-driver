@@ -1,4 +1,4 @@
-# Copyright (C) 2013 10gen Inc.
+# Copyright (C) 2009-2013 MongoDB, Inc.
 #
 # Licensed under the Apache License, Version 2.0 (the "License");
 # you may not use this file except in compliance with the License.
@@ -21,12 +21,22 @@ if RUBY_PLATFORM =~ /java/
     ext.classpath = jars.map { |x| File.expand_path x }.join(':')
     Rake::Task['clean'].invoke
   end
+  Rake::JavaExtensionTask.new('jsasl') do |ext|
+    ext.lib_dir ='ext/jsasl/target'
+    ext.classpath = File.expand_path(JRubyJars.core_jar_path)
+    Rake::Task['clean'].invoke
+  end
 else
   Rake::ExtensionTask.new('cbson') do |ext|
     ext.lib_dir = "lib/bson_ext"
     Rake::Task['clean'].invoke
   end
+  Rake::ExtensionTask.new('csasl') do |ext|
+    ext.name = "csasl"
+    ext.ext_dir = "ext/csasl"
+    ext.lib_dir = "lib/csasl"
+  end
 end
 
 desc "Run the default compile task"
-task :compile => RUBY_PLATFORM =~ /java/ ? 'compile:jbson' : 'compile:cbson'
+task :compile => RUBY_PLATFORM =~ /java/ ? ['compile:jbson', 'compile:jsasl'] : ['compile:cbson', 'compile:csasl']

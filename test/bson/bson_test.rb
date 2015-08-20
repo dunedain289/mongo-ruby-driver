@@ -1,6 +1,6 @@
 # encoding: utf-8
 
-# Copyright (C) 2013 10gen Inc.
+# Copyright (C) 2009-2013 MongoDB, Inc.
 #
 # Licensed under the Apache License, Version 2.0 (the "License");
 # you may not use this file except in compliance with the License.
@@ -366,6 +366,59 @@ class BSONTest < Test::Unit::TestCase
     assert_doc_pass(doc)
   end
 
+  def test_bson_regex
+    doc = { 'doc' => BSON::Regex.new('foobar') }
+    bson = @encoder.serialize(doc)
+    assert_equal @encoder.serialize(doc).to_a, bson.to_a
+    assert_equal doc, @encoder.deserialize(bson, :compile_regex => false)
+  end
+
+  def test_bson_regex_with_nonruby_flags
+    # create a bson regex with more flags than can be represented in Ruby
+    bson_regex = BSON::Regex.new('foobar', 'i', 'l', 'm', 's', 'u', 'x')
+    doc = { 'regexp' => bson_regex }
+    bson = @encoder.serialize(doc)
+    assert_equal @encoder.serialize(doc).to_a, bson.to_a
+    bson_regex = @encoder.deserialize(bson, :compile_regex => false)['regexp']
+    assert_equal BSON::Regex::IGNORECASE,       BSON::Regex::IGNORECASE       & bson_regex.options
+    assert_equal BSON::Regex::LOCALE_DEPENDENT, BSON::Regex::LOCALE_DEPENDENT & bson_regex.options
+    assert_equal BSON::Regex::MULTILINE,        BSON::Regex::MULTILINE        & bson_regex.options
+    assert_equal BSON::Regex::DOTALL,           BSON::Regex::DOTALL           & bson_regex.options
+    assert_equal BSON::Regex::UNICODE,          BSON::Regex::UNICODE          & bson_regex.options
+    assert_equal BSON::Regex::EXTENDED,         BSON::Regex::EXTENDED         & bson_regex.options
+  end
+
+  def test_bson_regex_to_ruby_regexp
+    bson_regex = BSON::Regex.new('foobar', 'i', 'l', 'm', 's', 'u', 'x')
+    doc = { 'doc' => bson_regex }
+    bson = @encoder.serialize(doc)
+    assert_equal 0x7, @encoder.deserialize(bson, :compile_regex => true)['doc'].options
+  end
+
+  def test_bson_regex_options
+    bson_regex = BSON::Regex.new('foobar', 'i')
+    doc = { 'doc' => bson_regex }
+    bson = @encoder.serialize(doc)
+    options = @encoder.deserialize(bson, :compile_regex => false)['doc'].options
+    assert_equal BSON::Regex::IGNORECASE, BSON::Regex::IGNORECASE & options
+    assert_equal 0, BSON::Regex::LOCALE_DEPENDENT & options
+    assert_equal 0, BSON::Regex::MULTILINE & options
+    assert_equal 0, BSON::Regex::DOTALL & options
+    assert_equal 0, BSON::Regex::UNICODE & options
+    assert_equal 0, BSON::Regex::EXTENDED & options
+  end
+
+  def test_ruby_regexp_to_bson_regex
+    regexp = Regexp.new(/foobar/imx)
+    doc = { 'doc' => regexp }
+    bson = @encoder.serialize(doc)
+    bson_regx = @encoder.deserialize(bson, :compile_regex => false)['doc']
+    assert_equal BSON::Regex::MULTILINE,  BSON::Regex::MULTILINE  & bson_regx.options
+    assert_equal BSON::Regex::EXTENDED,   BSON::Regex::EXTENDED   & bson_regx.options
+    assert_equal BSON::Regex::IGNORECASE, BSON::Regex::IGNORECASE & bson_regx.options
+    assert_equal BSON::Regex::DOTALL,     BSON::Regex::DOTALL     & bson_regx.options
+  end
+
   def test_boolean
     doc = {'doc' => true}
     assert_doc_pass(doc)
@@ -541,6 +594,18 @@ class BSONTest < Test::Unit::TestCase
     roundtrip = @encoder.deserialize(@encoder.serialize(val, false, true).to_s)
     assert_kind_of BSON::OrderedHash, roundtrip
     assert_equal '_id', roundtrip.keys.first
+  end
+
+  def test_bad_id_keys
+    doc = { '_id' => { '$bad' => 123 } }
+    check_keys = true
+    assert_raise BSON::InvalidKeyName do
+      @encoder.serialize(doc, check_keys)
+    end
+    doc = { '_id' => { '$oid' => '52d0b971b3ba219fdeb4170e' } }
+    assert_raise BSON::InvalidKeyName do
+      @encoder.serialize(doc, check_keys)
+    end
   end
 
   def test_nil_id

@@ -1,4 +1,4 @@
-# Copyright (C) 2013 10gen Inc.
+# Copyright (C) 2009-2013 MongoDB, Inc.
 #
 # Licensed under the Apache License, Version 2.0 (the "License");
 # you may not use this file except in compliance with the License.
@@ -18,35 +18,42 @@ class ReplicaSetAckTest < Test::Unit::TestCase
 
   def setup
     ensure_cluster(:rs)
-    @client = MongoReplicaSetClient.new(@rs.repl_set_seeds)
+    @client = MongoReplicaSetClient.from_uri(@uri, :op_timeout => TEST_OP_TIMEOUT)
 
     @slave1 = MongoClient.new(
       @client.secondary_pools.first.host,
       @client.secondary_pools.first.port, :slave_ok => true)
+    authenticate_client(@slave1)
 
     assert !@slave1.read_primary?
 
-    @db = @client.db(MONGO_TEST_DB)
+    @db = @client.db(TEST_DB)
     @db.drop_collection("test-sets")
     @col = @db.collection("test-sets")
   end
 
   def teardown
-    @client.close if @conn
+    @client.close if @client
   end
 
   def test_safe_mode_with_w_failure
-    assert_raise_error OperationFailure, "timeout" do
+    assert_raise_error WriteConcernError do
       @col.insert({:foo => 1}, :w => 4, :wtimeout => 1, :fsync => true)
     end
-    assert_raise_error OperationFailure, "timeout" do
+    assert_raise_error WriteConcernError do
       @col.update({:foo => 1}, {:foo => 2}, :w => 4, :wtimeout => 1, :fsync => true)
     end
-    assert_raise_error OperationFailure, "timeout" do
+    assert_raise_error WriteConcernError do
       @col.remove({:foo => 2}, :w => 4, :wtimeout => 1, :fsync => true)
     end
-    assert_raise_error OperationFailure do
-      @col.insert({:foo => 3}, :w => "test-tag")
+    if @client.server_version >= '2.5.4'
+      assert_raise_error WriteConcernError do
+        @col.insert({:foo => 3}, :w => "test-tag")
+      end
+    else # indistinguishable "errmsg"=>"exception: unrecognized getLastError mode: test-tag"
+      assert_raise_error OperationFailure do
+        @col.insert({:foo => 3}, :w => "test-tag")
+      end
     end
   end
 
@@ -54,17 +61,17 @@ class ReplicaSetAckTest < Test::Unit::TestCase
     @col.insert({:baz => "bar"}, :w => 3, :wtimeout => 5000)
 
     assert @col.insert({:foo => "0" * 5000}, :w => 3, :wtimeout => 5000)
-    assert_equal 2, @slave1[MONGO_TEST_DB]["test-sets"].count
+    assert_equal 2, @slave1[TEST_DB]["test-sets"].count
 
     assert @col.update({:baz => "bar"}, {:baz => "foo"}, :w => 3, :wtimeout => 5000)
-    assert @slave1[MONGO_TEST_DB]["test-sets"].find_one({:baz => "foo"})
+    assert @slave1[TEST_DB]["test-sets"].find_one({:baz => "foo"})
 
     assert @col.insert({:foo => "bar"}, :w => "majority")
 
     assert @col.insert({:bar => "baz"}, :w => :majority)
 
     assert @col.remove({}, :w => 3, :wtimeout => 5000)
-    assert_equal 0, @slave1[MONGO_TEST_DB]["test-sets"].count
+    assert_equal 0, @slave1[TEST_DB]["test-sets"].count
   end
 
   def test_last_error_responses

@@ -1,4 +1,4 @@
-# Copyright (C) 2013 10gen Inc.
+# Copyright (C) 2009-2013 MongoDB, Inc.
 #
 # Licensed under the Apache License, Version 2.0 (the "License");
 # you may not use this file except in compliance with the License.
@@ -13,8 +13,6 @@
 # limitations under the License.
 
 require 'test_helper'
-require 'mongo/exceptions'
-require 'mongo/util/conversions'
 
 class ConversionsTest < Test::Unit::TestCase
   include Mongo::Conversions
@@ -27,6 +25,34 @@ class ConversionsTest < Test::Unit::TestCase
   def test_array_as_sort_parameters_with_array_of_string_and_values
     params = array_as_sort_parameters([["field1", :asc], ["field2", :desc]])
     assert_equal({ "field1" => 1, "field2" => -1 }, params)
+  end
+
+  def test_array_as_sort_parameters_with_array_of_key_and_hash
+    params = array_as_sort_parameters(["score", {"$meta" => "textScore"}])
+    assert_equal({"score" => {"$meta" => "textScore"}}, params)
+  end
+
+  def test_array_as_sort_parameters_with_array_of_key_and_hashes
+    params = array_as_sort_parameters([["field1", :asc],["score", {"$meta" => "textScore"}]])
+    assert_equal({"field1" => 1, "score" => {"$meta" => "textScore"}}, params)
+  end
+
+  def test_hash_as_sort_parameters_with_string
+    sort = BSON::OrderedHash["field", "asc"]
+    params = hash_as_sort_parameters(sort)
+    assert_equal({"field" => 1}, params)
+  end
+
+  def test_hash_as_sort_parameters_with_hash
+    sort = BSON::OrderedHash["score", {"$meta" => "textScore"}]
+    params = hash_as_sort_parameters(sort)
+    assert_equal({"score" => {"$meta" => "textScore"}}, params)
+  end
+
+  def test_hash_as_sort_parameters_with_hash_and_string
+    sort = BSON::OrderedHash["score", {"$meta" => "textScore"}, "field", "asc"]
+    params = hash_as_sort_parameters(sort)
+    assert_equal({ "score" => {"$meta" => "textScore"}, "field" => 1 }, params)
   end
 
   def test_string_as_sort_parameters_with_string
@@ -122,6 +148,10 @@ class ConversionsTest < Test::Unit::TestCase
 
   def test_sort_value_when_value_is_uppercase_symbol_desc
     assert_equal(-1, sort_value(:DESC))
+  end
+
+  def test_sort_value_when_value_is_hash
+    assert_equal({"$meta" => "textScore"}, sort_value("$meta" => "textScore"))
   end
 
   def test_sort_value_when_value_is_invalid

@@ -1,4 +1,4 @@
-# Copyright (C) 2013 10gen Inc.
+# Copyright (C) 2009-2013 MongoDB, Inc.
 #
 # Licensed under the Apache License, Version 2.0 (the "License");
 # you may not use this file except in compliance with the License.
@@ -50,45 +50,49 @@ module Mongo
     OP_QUERY_NO_CURSOR_TIMEOUT = 2 ** 4
     OP_QUERY_AWAIT_DATA        = 2 ** 5
     OP_QUERY_EXHAUST           = 2 ** 6
+    OP_QUERY_PARTIAL           = 2 ** 7
 
     REPLY_CURSOR_NOT_FOUND     = 2 ** 0
     REPLY_QUERY_FAILURE        = 2 ** 1
     REPLY_SHARD_CONFIG_STALE   = 2 ** 2
     REPLY_AWAIT_CAPABLE        = 2 ** 3
   end
+
+  module ErrorCode # MongoDB Core Server src/mongo/base/error_codes.err
+    BAD_VALUE                = 2
+    UNKNOWN_ERROR            = 8
+    INVALID_BSON             = 22
+    WRITE_CONCERN_FAILED     = 64
+    MULTIPLE_ERRORS_OCCURRED = 65
+    UNAUTHORIZED             = 13
+
+    # mongod/s 2.6 and above return code 59 when a command doesn't exist.
+    # mongod versions previous to 2.6 and mongos 2.4.x return no error code
+    # when a command does exist.
+    # mongos versions previous to 2.4.0 return code 13390 when a command
+    # does not exist.
+    COMMAND_NOT_FOUND_CODES  = [nil, 59, 13390]
+  end
 end
 
 require 'bson'
 
-require 'mongo/util/thread_local_variable_manager'
-require 'mongo/util/conversions'
-require 'mongo/util/support'
-require 'mongo/util/read_preference'
-require 'mongo/util/write_concern'
-require 'mongo/util/core_ext'
-require 'mongo/util/logging'
-require 'mongo/util/node'
-require 'mongo/util/pool'
-require 'mongo/util/pool_manager'
-require 'mongo/util/sharding_pool_manager'
-require 'mongo/util/server_version'
-require 'mongo/util/socket_util'
-require 'mongo/util/ssl_socket'
-require 'mongo/util/tcp_socket'
-require 'mongo/util/unix_socket'
-require 'mongo/util/uri_parser'
+require 'set'
+require 'thread'
+require 'monitor'
 
-
+require 'mongo/utils'
+require 'mongo/exception'
+require 'mongo/functional'
+require 'mongo/connection'
+require 'mongo/collection_writer'
+require 'mongo/collection'
+require 'mongo/bulk_write_collection_view'
+require 'mongo/cursor'
+require 'mongo/db'
+require 'mongo/gridfs'
 require 'mongo/networking'
 require 'mongo/mongo_client'
 require 'mongo/mongo_replica_set_client'
 require 'mongo/mongo_sharded_client'
 require 'mongo/legacy'
-require 'mongo/collection'
-require 'mongo/cursor'
-require 'mongo/db'
-require 'mongo/exceptions'
-require 'mongo/gridfs/grid_ext'
-require 'mongo/gridfs/grid'
-require 'mongo/gridfs/grid_io'
-require 'mongo/gridfs/grid_file_system'
